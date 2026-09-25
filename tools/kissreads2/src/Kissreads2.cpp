@@ -54,6 +54,7 @@ Kissreads2::Kissreads2 () : Tool ("Kissreads2")
     getParser()->push_front (new OptionOneParam (STR_URI_OUTPUT_UNCOHERENT,         "Output uncoherent file name",                      false,"/dev/null"));
     getParser()->push_front (new OptionOneParam (STR_URI_READS_INPUT,               "Input reads",  true));
     getParser()->push_front (new OptionOneParam (STR_URI_PREDICTION_INPUT,          "Input predictions",  true));
+    getParser()->push_front (new OptionNoParam  (STR_PHASING_SITES,                 "[Experimental] With -phasing, also write phased_sites_read_set_id_N.txt: for every (pair of) read(s), all the SNP paths it maps and the SNPs of each path it covers (implies -phasing)",  false));
     getParser()->push_front (new OptionNoParam  (STR_PHASING,                       "[Experimental] Phase alleles mapped by the same (pair of) read(s)",  false)); //CHARLOTTE
 }
 
@@ -121,7 +122,8 @@ void Kissreads2::execute ()
     
     gv.compute_genotypes=       props->get    (STR_KISSREADS_GENOTYPE)      != 0;
     gv.standard_fasta=          props->get    (STR_KISSREADS_OUTPUT_FASTA)  != 0;
-    gv.phasing=                 props->get    (STR_PHASING)                 != 0;
+    gv.phasing_sites=           props->get    (STR_PHASING_SITES)           != 0;
+    gv.phasing=                 props->get    (STR_PHASING)                 != 0 || gv.phasing_sites;
     gv.set_mask_code_seed();
     
     

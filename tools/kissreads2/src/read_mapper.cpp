@@ -26,6 +26,11 @@
  */
 
 #include <read_mapper.h>
+#include <mutex>
+#include <algorithm>
+
+// The phasing maps are shared by all the threads of the Dispatcher: every update must hold this lock
+static std::mutex phasing_mutex;
 
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -252,14 +257,33 @@ struct Functor
     const int read_set_id;
     u_int64_t * number_of_mapped_reads;
     map<string,int> & phased_variants;
+    map<string,int> & phased_sites;
     
     
     
     
-    Functor (GlobalValues & gv, FragmentIndex& index, const int read_set_id, u_int64_t * number_of_mapped_reads, map<string,int> & phased_variants) : gv(gv), index(index), read_set_id(read_set_id), number_of_mapped_reads(number_of_mapped_reads), phased_variants(phased_variants){}
+    Functor (GlobalValues & gv, FragmentIndex& index, const int read_set_id, u_int64_t * number_of_mapped_reads, map<string,int> & phased_variants, map<string,int> & phased_sites) : gv(gv), index(index), read_set_id(read_set_id), number_of_mapped_reads(number_of_mapped_reads), phased_variants(phased_variants), phased_sites(phased_sites){}
+
+    // Adds one fact to a shared phasing map
+    void count_fact(map<string,int> & facts, const string & fact){
+        std::lock_guard<std::mutex> lock(phasing_mutex);
+        facts[fact] += 1;
+    }
+
+    // "12h:101;15l:1;" : every SNP path mapped by the read(s) and, for each, which of its SNPs (in path order) the read covers.
+    // Written only when the reads cover at least two SNPs in total (a single SNP carries no phase).
+    void count_site_fact(map<string,string> & site_obs){
+        int nb_covered = 0;
+        string fact = "";
+        for (map<string,string>::iterator it=site_obs.begin(); it!=site_obs.end(); ++it){
+            nb_covered += std::count(it->second.begin(), it->second.end(), '1');
+            fact += it->first + ":" + it->second + ";";
+        }
+        if (nb_covered > 1) count_fact(phased_sites, fact);
+    }
     
     
-    map<int,pair<char,int64_t>> core_mapping(char *read, char * quality){
+    map<int,pair<char,int64_t>> core_mapping(char *read, char * quality, map<string,string> & site_obs){
         map<int,pair<char,int64_t>> pwi_and_mapped_predictions;                        // stores for this reads the succesfully mapped predictions (direction '+' or '-') and their id together with their pwi.
         // note that we cannot use simply the -id to indicate the orientation, as prediction 0 exists.
         
@@ -370,6 +394,20 @@ struct Functor
                                 mapped_prediction_as_set.insert     (value->first);     // This prediction whould not be mapped again with the same read
                                 // currently the phasing works better with SNPs, as boths paths of  an indel may be mapped by a same read
                                 if (index.all_predictions[value->first]->nbOfSnps !=0){      // If this is not an indel (todo phase also indels)
+                                    if (gv.phasing_sites){
+                                        // the read covers [pwi, pwi+read_len[ of the prediction, whatever its direction:
+                                        // a SNP inside this interval is observed (kissreads2 forbids mismatches on SNP positions)
+                                        // SNP_positions and nbOfSnps are only computed for the higher path (even id)
+                                        const Fragment * fragment = index.all_predictions[value->first-value->first%2];
+                                        string mask(fragment->nbOfSnps, '0');
+                                        for (unsigned int snp=0; snp<fragment->nbOfSnps; snp++){
+                                            const int snp_position = (int)fragment->SNP_positions[snp];
+                                            if (snp_position >= pwi && snp_position < pwi + (int)read_len) mask[snp] = '1';
+                                        }
+                                        string & previous = site_obs[parse_variant_id(index.all_predictions[value->first]->sequence.getComment())];
+                                        if (previous.size() != mask.size()) previous = mask;
+                                        else for (size_t snp=0; snp<mask.size(); snp++) if (mask[snp] == '1') previous[snp] = '1';
+                                    }
                                     
                                     char sign=direction==0?'\0':'-';
                                     
@@ -442,7 +480,9 @@ struct Functor
         char *read = strdup(seq.toString().c_str());
         char * quality = strdup(seq.getQuality().c_str());
         
-        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions = core_mapping(read, quality);
+        map<string,string> site_obs;
+        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions = core_mapping(read, quality, site_obs);
+        if (gv.phasing_sites) count_site_fact(site_obs);
         
         // clear (if one still have to check the reverse complement of the read) or free (else) the list of int for each prediction_id on which we tried to map the current read
         
@@ -540,10 +580,7 @@ struct Functor
                 if (nb_variants_in_fact>1)  // No need to store facts composed of zero or one variant
                 {
                     // Associate this string to the number of times it is seen when mapping this read set
-                    if (phased_variants.find(phased_variant_ids) == phased_variants.end())
-                        phased_variants[phased_variant_ids] = 1;
-                    else
-                        phased_variants[phased_variant_ids] = phased_variants[phased_variant_ids]+1;
+                    count_fact(phased_variants, phased_variant_ids);
                 }
             }
             
@@ -565,8 +602,10 @@ struct Functor
         char *read2 = strdup(pair.second.toString().c_str());
         char * quality2 = strdup(pair.second.getQuality().c_str());
         
-        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions1 = core_mapping(read1, quality1);
-        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions2 = core_mapping(read2, quality2);
+        map<string,string> site_obs;                                                   // shared by the two mates: one fragment
+        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions1 = core_mapping(read1, quality1, site_obs);
+        map<int,std::pair<char,int64_t>> pwi_and_mapped_predictions2 = core_mapping(read2, quality2, site_obs);
+        if (gv.phasing_sites) count_site_fact(site_obs);
         
         // clear (if one still have to check the reverse complement of the read) or free (else) the list of int for each prediction_id on which we tried to map the current read
         
@@ -746,8 +785,7 @@ struct Functor
                     if (phased_variant_ids.back() == ' ') // Removes last character if this is a ' ' (no phasing in the right part of the paired fact)
                         phased_variant_ids.pop_back();
                     // Associate this string to the number of times it is seen when mapping this read set
-                    if (phased_variants.find(phased_variant_ids) == phased_variants.end())  phased_variants[phased_variant_ids] = 1;
-                    else                                                                    phased_variants[phased_variant_ids] =   phased_variants[phased_variant_ids]+1;
+                    count_fact(phased_variants, phased_variant_ids);
                 }
             }
             
@@ -796,6 +834,7 @@ u_int64_t ReadMapper::map_all_reads_from_a_file (
     
     u_int64_t number_of_mapped_reads = 0;
     map<string,int> phased_variants;
+    map<string,int> phased_sites;
     
     // Few tests for finding pair of banks.
     //    cout <<inputBank->getId()<<" "<<inputBank->getCompositionNb()<<endl;
@@ -814,13 +853,13 @@ u_int64_t ReadMapper::map_all_reads_from_a_file (
         LOCAL(itPair);
         
         ProgressIterator< std::pair <Sequence, Sequence>> prog_iter (itPair, Stringify::format ("Mapping pairend read set %d", read_set_id).c_str(), bank1->estimateNbItems());
-        Dispatcher(nbCores,2047).iterate (prog_iter, Functor(gv, index, read_set_id, &number_of_mapped_reads, phased_variants));
+        Dispatcher(nbCores,2047).iterate (prog_iter, Functor(gv, index, read_set_id, &number_of_mapped_reads, phased_variants, phased_sites));
     }
     
     else{ // SINGLE END
         // We create a sequence iterator for the bank with progress information
         ProgressIterator<Sequence> iter (*inputBank, Stringify::format ("Mapping read set %d", read_set_id).c_str());
-        Dispatcher(nbCores,2047).iterate (iter, Functor(gv, index, read_set_id, &number_of_mapped_reads, phased_variants));
+        Dispatcher(nbCores,2047).iterate (iter, Functor(gv, index, read_set_id, &number_of_mapped_reads, phased_variants, phased_sites));
     }
     
     // PHASING:
@@ -833,6 +872,16 @@ u_int64_t ReadMapper::map_all_reads_from_a_file (
         for (map<string,int>::iterator it=phased_variants.begin(); it!=phased_variants.end(); ++it)
             phasingFile << it->first << " => " << it->second << '\n';
         phasingFile.close();
+    }
+    if (gv.phasing_sites){
+        stringstream sitesFileName;
+        sitesFileName<<"phased_sites_read_set_id_"<<(read_set_id+1)<<".txt";
+        cout<<"print in phasing information in "<<sitesFileName.str()<<endl;
+        ofstream sitesFile (sitesFileName.str());
+        sitesFile <<"#"<<inputBank->getId()<<endl;
+        for (map<string,int>::iterator it=phased_sites.begin(); it!=phased_sites.end(); ++it)
+            sitesFile << it->first << " => " << it->second << '\n';
+        sitesFile.close();
     }
     // ENDPHASING
     

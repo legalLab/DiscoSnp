@@ -66,7 +66,7 @@ e="" # if set to -e: Map variant predictions on reference genome with their unit
 graph_reused="Egg62hdS7knSFvF3" # with -g option, we use a previously created graph. 
 
 #EDIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
-EDIR=$( python3 -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
+EDIR=$( python -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
 
 
 if [ -d "$EDIR/build/" ] ; then # VERSION SOURCE COMPILED
@@ -88,6 +88,7 @@ wraith="false"
 genome=""
 bwa_path_option=""
 option_phase_variants=""
+haplotypes=0
 bwa_distance=4
 
 #######################################################################
@@ -149,6 +150,10 @@ function help {
     echo -e "\t\t Max number of used threads. 0 means all threads"
     echo -e "\t\t default 0"
 
+    echo -e "\t -H | --haplotypes"
+    echo -e "\t\t Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
+    echo -e "\t\t Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
+    echo -e "\t\t then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv and _loci.fa. The usual outputs are unchanged."
 
     echo -e "\nREFERENCE GENOME AND/OR VCF CREATION OPTIONS"
     echo -e "\t -G | --reference_genome <file name>"
@@ -186,6 +191,12 @@ while :; do
         echo "Will phase variants during kissreads process - WARNING this option is too experimental and thus not described in the help message"
         echo "You can obtain clusters using script : \"script/from_phased_alleles_to_clusters.sh file_name_of_phased_alleles\" (the filename(s) is/are given during kissreads process"
         ;;
+
+    -H|--haplotypes)
+        haplotypes=1
+        option_phase_variants="-phasing"   # -phasing_sites is added below if this kissreads2 knows it
+        ;;
+
     -X)
         stop_after_kissnp=1
         ;;
@@ -193,9 +204,11 @@ while :; do
     -z)
         aav=1
         ;;
+
     -w)
         wraith="true"
         ;;
+
     -R)
         useref="true"
         output_coverage_option="-dont_output_first_coverage"
@@ -210,7 +223,7 @@ while :; do
         fi
         ;;
 
-    -v)        
+    -v)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
             verbose=$2
             shift
@@ -228,8 +241,6 @@ while :; do
         fi
         ;;
 
-
-
     -T|--contigs)
         extend="-T"
         ;;
@@ -243,7 +254,6 @@ while :; do
         fi
         ;;
 
-
     -n|--no_genotype)
         genotyping=""
         ;;
@@ -251,6 +261,7 @@ while :; do
     -l|--no_low_complexity)
         l=""
         ;;
+
     -h|-\?|--help)
         help
         exit 
@@ -273,7 +284,7 @@ while :; do
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
         fi
         ;;
-        
+
     -b|--branching)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
             b=$2
@@ -300,7 +311,6 @@ while :; do
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
         fi
         ;;
-
 
     -P|--max_snp_per_bubble)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
@@ -505,10 +515,10 @@ if [ ! -z "${read_sets_kissreads}" ]; then
     ${read_file_names_bin} -in ${read_sets_kissreads} > $mapped_readsFilesDump
 fi
 
-
 ############################################################
 #################### GRAPH CREATION  #######################
 ############################################################
+
 if [ ! -f ${graph_reused} ]; then # no graph was given or the given graph was not a file. 
     T="$(date +%s)"
     echo -e "$yellow ############################################################"
@@ -548,6 +558,7 @@ echo $reset
 ######################################################
 #################### KISSNP2   #######################
 ######################################################
+
 T="$(date +%s)"
 echo -e "$yellow ############################################################"
 echo -e " #################### KISSNP2 MODULE  #######################"
@@ -592,14 +603,46 @@ if [ $stop_after_kissnp -eq 1 ]; then
 fi
 
 #######################################################################
-#################### KISSREADS                  #######################
+#################### HAPLOTYPE MODE: SEQUENCE CONTEXTS ################
+#######################################################################
+
+if [ $haplotypes -eq 1 ]; then
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
+    echo "     ############################################################$reset"
+    if ${kissreads2_bin} -help 2>&1 | grep -q -- "-phasing_sites"; then
+        option_phase_variants="-phasing -phasing_sites"
+    else
+        echo "${red}WARNING: ${kissreads2_bin} has no -phasing_sites option (recompile DiscoSnp with the patched kissreads2):"
+        echo "         some heterozygous sites of loci containing multi-SNP bubbles may stay unphased${reset}"
+    fi
+    # Write every SNP bubble in the other contexts seen at the close SNPs of its locus:
+    # kissreads2 needs an exact seed of k-5 nt, reads carrying other alleles nearby are lost otherwise.
+    augmentCmd="python $EDIR/scripts/disco_haplotypes.py augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
+    echo $green$augmentCmd$cyan
+    if [[ "$wraith" == "false" ]]; then
+        $augmentCmd
+        if [ $? -ne 0 ]
+        then
+            echo "${red}there was a problem with haplotype extraction$reset"
+            exit 1
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Haplotype extraction time in seconds: ${T}${reset}"
+        mv ${kissprefix}_augmented.fa $kissprefix.fa
+        rm -f phased_alleles_read_set_id_*.txt phased_sites_read_set_id_*.txt   # facts of a previous run would be mixed with the new ones
+    fi
+fi
+
+#######################################################################
+############################## KISSREADS ##############################
 #######################################################################
 
 T="$(date +%s)"
     echo -e "$yellow #############################################################"
     echo -e " #################### KISSREADS MODULE #######################"
     echo -e " #############################################################$reset"
-
 
 smallk=$k
 if (( $smallk>31 ))  ; then
@@ -629,18 +672,18 @@ then
     echo "$red there was a problem with kissreads2$reset":
     exit 1
 fi
-echo $reset
 T="$(($(date +%s)-T))"
-# echo "Kissreads (mapping reads on bubbles) time in seconds: ${T}"
+echo "${yellow}Kissreads (mapping reads on bubbles) time in seconds: ${T}${reset}"
 
 
 #######################################################################
-#################### SORT AND FORMAT  RESULTS #########################
+#################### SORT AND FORMAT RESULTS ##########################
 #######################################################################
 
+T="$(date +%s)"
 if [[ "$wraith" == "false" ]]; then
 echo -e "$yellow ###############################################################"
-echo -e " #################### SORT AND FORMAT  RESULTS #################"
+echo -e " #################### SORT AND FORMAT RESULTS ##################"
 echo -e " ###############################################################$reset"
 fi
 
@@ -662,16 +705,45 @@ then
     echo "$red there was a problem with the result sorting$reset"
     exit 1
 fi
+T="$(($(date +%s)-T))"
+echo "${yellow}Sorting and formatting time in seconds: ${T}${reset}"
 
 rm -f $kissprefix.fa ${kissprefix}_coherent ${kissprefix}_uncoherent
 rm -rf ${read_sets}_${kissprefix}_removemeplease 
 
 #######################################################################
-#################### DISCOSNP FINISHED ###############################
+#################### HAPLOTYPE MODE: SITES AND HAPLOTYPES #############
 #######################################################################
 
+if [ $haplotypes -eq 1 ]; then
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
+    echo "     ############################################################$reset"
+    haplotypesCmd="python $EDIR/scripts/disco_haplotypes.py call -c ${kissprefix}_coherent.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes"
+    echo $green$haplotypesCmd$cyan
+    if [[ "$wraith" == "false" ]]; then
+        $haplotypesCmd
+        haplotypes_status=$?
+        # The synthetic bubbles are removed EVEN IF call failed, so that no downstream tool
+        # (clustering, VCF, fasta converters) ever sees them: the usual fasta and VCF outputs are the same as without -H
+        for fasta_file in ${kissprefix}_coherent.fa ${kissprefix}_uncoherent.fa; do
+            python $EDIR/scripts/disco_haplotypes.py strip -i ${fasta_file} -o ${fasta_file}_stripped -m ${kissprefix}_synthetic_bubbles.tsv
+            mv ${fasta_file}_stripped ${fasta_file}
+        done
+        if [ $haplotypes_status -ne 0 ]
+        then
+            echo "${red}there was a problem with haplotype extraction$reset"
+            exit 1
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Final haplotype extraction time in seconds: ${T}${reset}"
+    fi
+fi
 
-
+#######################################################################
+#################### DISCOSNP FINISHED ###############################
+#######################################################################
 
 
 
@@ -695,6 +767,8 @@ if [ -z "$genome" ]; then #  NO reference genome use, vcf creator mode 1
         echo "$red there was a problem with VCF creation. See how to use the \"run_VCF_creator.sh\" alone.$reset"
         exit 1
     fi
+    T="$(($(date +%s)-T))"
+    echo "${red}VCF formation time in seconds: ${T}$reset"
 else # A Reference genome is provided, vcf creator mode 2
     vcfCreatorCmd="$EDIR/scripts/run_VCF_creator.sh $bwa_path_option -G $genome $bwa_path_option -p ${kissprefix}_coherent.fa -o ${kissprefix}_coherent.vcf  -I $option_cores_post_analysis $e"
     echo $green$vcfCreatorCmd$cyan
@@ -707,9 +781,10 @@ else # A Reference genome is provided, vcf creator mode 2
         echo "$red there was a problem with VCF creation. See how to use the \"run_VCF_creator.sh\" alone.$reset"
         exit 1
     fi
+    T="$(($(date +%s)-T))"
+    echo "${red}VCF formation time in seconds: ${T}$reset"
 fi
-echo $reset
-T="$(($(date +%s)-T))"
+
 if [[ "$wraith" == "false" ]]; then
     echo "$yellow Vcf creation time in seconds: ${T}"
     

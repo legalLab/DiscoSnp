@@ -67,6 +67,7 @@ public:
     uint64_t  mask_offset_seed;
     unsigned int nbits_nbseeds;//saturated increment of unsigned char
     bool phasing;
+    bool phasing_sites;       // -phasing_sites: also write, per read, every SNP path mapped and the SNPs it covers
     
     GlobalValues(){
         

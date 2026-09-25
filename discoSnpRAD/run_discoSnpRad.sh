@@ -81,7 +81,7 @@ max_size_cluster=150
 max_missing=0.95
 min_rank=0.4
 
-EDIR=$( python3 -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
+EDIR=$( python -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
 
 if [ -d "$EDIR/../build/" ] ; then # VERSION SOURCE COMPILED
     read_file_names_bin=$EDIR/../build/bin/read_file_names
@@ -101,6 +101,7 @@ chmod u+x $EDIR/../scripts/*.sh $EDIR/scripts/*.sh $EDIR/run_discoSnpRad.sh 2>/d
 wraith="false"
 max_truncated_path_length_difference=0
 option_phase_variants=""
+haplotypes=0
 #######################################################################
 #################### END HEADER                 #######################
 #######################################################################
@@ -166,15 +167,10 @@ function help {
     echo "      --min_rank <float value>"
     echo "           Remove variants whose rank is smaller than this threshold. (Default 0.4)"
     
-
-
-    
-    
 #    echo "      -L | --max_diff_len <integer>" # Hidden - 
 #    echo "           Longest accepted difference length between two paths of a truncated bubble"
 #    echo "           default 0"
     
-
 #    echo "      -a | --ambiguity_max_size <int>" # Hidden
 #    echo "           Maximal size of ambiguity of INDELs. INDELS whose ambiguity is higher than this value are not output  [default '20']"
     echo ""
@@ -183,8 +179,10 @@ function help {
     echo "           discoSnpRad will search up to P SNPs in a unique bubble. Default=5"
     echo "      -d | --max_substitutions <int>"
     echo "           Set the number of authorized substitutions used while mapping reads on found SNPs (kissreads). Default=10"
-    
-    
+    echo "      -H | --haplotypes"
+    echo "           Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
+    echo "           Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
+    echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv and _loci.fa. The usual outputs are unchanged."
     echo ""
     echo "MISC."
     echo "      -u | --max_threads <int>"
@@ -202,11 +200,9 @@ function help {
 
 
 
-
 #######################################################################
 #################### GET OPTIONS                #######################
 #######################################################################
-
 
 echo "${yellow}"
 
@@ -239,16 +235,25 @@ while :; do
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
         fi
         ;;
-    
+
+        # option added by Tomas Hrbek 25/09/2026
+    -H|--haplotypes)
+        haplotypes=1
+        option_phase_variants="-phasing"   # -phasing_sites is added below if this kissreads2 knows it
+        ;;
+
+        # experimental option of DiscoSnp
     -A) 
         option_phase_variants="-phasing"
         extend="-t"
         echo "Will phase variants during kissreads process - WARNING this option is too experimental and thus not described in the help message"
         echo "You can obtain clusters using script : \"script/from_phased_alleles_to_clusters.sh file_name_of_phased_alleles\" (the filename(s) is/are given during kissreads process"
         ;;
+
     -w)
         wraith="true"
         ;;
+
     -S|--src)
     	clustering="true"
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then # checks that there exists a second value and its is not the start of the next option
@@ -256,6 +261,7 @@ while :; do
             shift
         fi
         ;;
+
     -a|--ambiguity_max_size)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then # checks that there exists a second value and its is not the start of the next option
             max_ambigous_indel=$2
@@ -264,8 +270,8 @@ while :; do
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
         fi
         ;;
-       
-    -v)        
+
+    -v)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
             verbose=$2
             shift
@@ -299,7 +305,7 @@ while :; do
     -l|--no_low_complexity)
         l=""
         ;;
-        
+
     -h|-\?|--help)
         help
         exit 
@@ -314,7 +320,6 @@ while :; do
         fi
         ;;
 
-        
     -p|--prefix)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
             prefix=$2
@@ -332,7 +337,6 @@ while :; do
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
         fi
         ;;
-
 
     -P|--max_snp_per_bubble)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
@@ -396,7 +400,6 @@ while :; do
         fi
         ;;
 
-
     -e)
         e="-e"
         ;;
@@ -450,37 +453,36 @@ fi
 #Checks if clustering can be performed
 
 if [[ "$clustering" == "true" ]]; then
-	# first tests the directory given by user if any
-	if [ -n "$short_read_connector_path" ]; then
-		src_file="$short_read_connector_path/short_read_connector_linker.sh"
-    	if [ -f "$src_file" ]; then
+    # first tests the directory given by user if any
+    if [ -n "$short_read_connector_path" ]; then
+        src_file="$short_read_connector_path/short_read_connector_linker.sh"
+        if [ -f "$src_file" ]; then
             echo "${yellow}short_read_connector path is $src_file$reset"
-    	else
-    		echo "${red}               **************************************************************************"
+        else
+            echo "${red}               **************************************************************************"
             echo "               ** WARNING: I cannot find short_read_connector (-S). "
             echo "               ** $src_file does not exist"
             echo "               ** I will not cluster variants per RAD locus"
             echo "               **************************************************************************"
             echo $reset
-    		clustering="false"
-    	fi
+            clustering="false"
+        fi
     else
-    	#then tests if src is in the PATH env variable
-    	src_file=$(command -v short_read_connector_linker.sh)
-    	if [ -n "$src_file" ]; then
-    		echo "${yellow}short_read_connector_linker path is $src_file$reset"
-    	else
-    		echo "${red}               **************************************************************************"
+        #then tests if src is in the PATH env variable
+        src_file=$(command -v short_read_connector_linker.sh)
+        if [ -n "$src_file" ]; then
+            echo "${yellow}short_read_connector_linker path is $src_file$reset"
+        else
+            echo "${red}               **************************************************************************"
             echo "               ** WARNING: I cannot find short_read_connector in PATH. "
             echo "               ** Try giving the absolute path of short_read_connector directory with option -S"
             echo "               ** I will not cluster variants per RAD locus"
             echo "               **************************************************************************"
             echo $reset
-    		clustering="false"
-    	fi
+            clustering="false"
+        fi
     fi
 fi
-    		
 
 
 ######### CHECK THE k PARITY ##########
@@ -540,6 +542,7 @@ if [[ "$wraith" == "false" ]]; then
     echo
 fi
 
+
 #######################################################################
 #################### END OPTIONS SUMMARY        #######################
 #######################################################################
@@ -547,6 +550,7 @@ fi
 #############################################################
 #################### DUMP READ FILES  #######################
 #############################################################
+
 dumpCmd="${read_file_names_bin} -in $read_sets"
     echo $green${dumpCmd} "> $readsFilesDump"$cyan
     if [[ "$wraith" == "false" ]]; then
@@ -564,7 +568,6 @@ fi
 #################### GRAPH CREATION  #######################
 ############################################################
 
-
 if [ ! -f ${graph_reused} ]; then # no graph was given or the given graph was not a file. 
     T="$(date +%s)"
     echo "${yellow}     ############################################################"
@@ -576,7 +579,7 @@ if [ ! -f ${graph_reused} ]; then # no graph was given or the given graph was no
     if [[ "$wraith" == "false" ]]; then
         ${graphCmd}
     fi
-    
+
     if [ $? -ne 0 ]
     then
         echo "${red}there was a problem with graph construction${reset}"
@@ -603,6 +606,7 @@ fi
 ######################################################
 #################### KISSNP2   #######################
 ######################################################
+
 T="$(date +%s)"
 echo "${yellow}     ############################################################"
 echo "     #################### KISSNP2 MODULE  #######################"
@@ -636,22 +640,60 @@ fi
 #######################################################################
 #################### REDUNDANCY REMOVAL         #######################
 #######################################################################
+
+T="$(date +%s)"
 echo "${yellow}     ############################################################"
 echo "     #################### REDUNDANCY REMOVAL  ###################"
 echo "     ############################################################$reset"
 redundancy_removal_cmd="python $EDIR/../scripts/redundancy_removal_discosnp.py ${kissprefix}_r.fa $k $kissprefix.fa"
 echo $green${redundancy_removal_cmd}$cyan
 if [[ "$wraith" == "false" ]]; then
-   eval ${redundancy_removal_cmd}
+    eval ${redundancy_removal_cmd}
 fi
 if [ $? -ne 0 ]
 then
     echo "${red}there was a problem with redundancy removal$reset":
     exit 1
 fi
+T="$(($(date +%s)-T))"
+echo "${yellow}Redundacy removal time in seconds: ${T}${reset}"
 
 #######################################################################
-#################### KISSREADS                  #######################
+#################### HAPLOTYPE MODE: SEQUENCE CONTEXTS ################
+#######################################################################
+
+if [ $haplotypes -eq 1 ]; then
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
+    echo "     ############################################################$reset"
+    if ${kissreads2_bin} -help 2>&1 | grep -q -- "-phasing_sites"; then
+        option_phase_variants="-phasing -phasing_sites"
+    else
+        echo "${red}WARNING: ${kissreads2_bin} has no -phasing_sites option (recompile DiscoSnp with the patched kissreads2):"
+        echo "         some heterozygous sites of loci containing multi-SNP bubbles may stay unphased${reset}"
+    fi
+    # Done AFTER the redundancy removal, which keeps a single context per SNP.
+    # Write every SNP bubble in the other contexts seen at the close SNPs of its locus:
+    # kissreads2 needs an exact seed of k-5 nt, reads carrying other alleles nearby are lost otherwise.
+    augmentCmd="python $EDIR/../scripts/disco_haplotypes.py augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
+    echo $green$augmentCmd$cyan
+    if [[ "$wraith" == "false" ]]; then
+        $augmentCmd
+        if [ $? -ne 0 ]
+        then
+            echo "${red}there was a problem with haplotype extraction$reset"
+            exit 1
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Haplotype extraction time in seconds: ${T}${reset}"
+        mv ${kissprefix}_augmented.fa $kissprefix.fa
+        rm -f phased_alleles_read_set_id_*.txt phased_sites_read_set_id_*.txt   # facts of a previous run would be mixed with the new ones
+    fi
+fi
+
+#######################################################################
+############################## KISSREADS ##############################
 #######################################################################
 
 T="$(date +%s)"
@@ -677,17 +719,17 @@ then
     echo "${red}there was a problem with kissreads2$reset":
     exit 1
 fi
-echo $reset
 T="$(($(date +%s)-T))"
-# echo "Kissreads (mapping reads on bubbles) time in seconds: ${T}"
+echo "${yellow}Kissreads (mapping reads on bubbles) time in seconds: ${T}${reset}"
 
 
 #######################################################################
-#################### SORT AND FORMAT  RESULTS #########################
+#################### SORT AND FORMAT RESULTS ##########################
 #######################################################################
 
+T="$(date +%s)"
 echo "${yellow}     ###############################################################"
-echo "     #################### SORT AND FORMAT  RESULTS #################"
+echo "     #################### SORT AND FORMAT RESULTS ##################"
 echo "     ###############################################################$reset"
 if [[ "$wraith" == "false" ]]; then
     sort -rg ${kissprefix}_coherent | cut -d " " -f 2 | tr ';' '\n' > ${kissprefix}_raw.fa
@@ -705,6 +747,36 @@ then
     echo "${red}there was a problem with the result sorting$reset"
     exit 1
 fi
+T="$(($(date +%s)-T))"
+echo "${yellow}Sorting and formatting time in seconds: ${T}${reset}"
+
+#######################################################################
+#################### HAPLOTYPE MODE: SITES AND HAPLOTYPES #############
+#######################################################################
+
+if [ $haplotypes -eq 1 ]; then
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
+    echo "     ############################################################$reset"
+    haplotypesCmd="python $EDIR/../scripts/disco_haplotypes.py call -c ${kissprefix}_raw.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes"
+    echo $green$haplotypesCmd$cyan
+    if [[ "$wraith" == "false" ]]; then
+        $haplotypesCmd
+        haplotypes_status=$?
+        # The synthetic bubbles are removed EVEN IF call failed, so that no downstream tool
+        # (clustering, VCF, fasta converters) ever sees them: clustering and the usual VCF are the same as without -H
+        python $EDIR/../scripts/disco_haplotypes.py strip -i ${kissprefix}_raw.fa -o ${kissprefix}_raw.fa_stripped -m ${kissprefix}_synthetic_bubbles.tsv
+        mv ${kissprefix}_raw.fa_stripped ${kissprefix}_raw.fa
+        if [ $haplotypes_status -ne 0 ]
+        then
+            echo "${red}there was a problem with haplotype extraction$reset"
+            exit 1
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Final haplotype extraction time in seconds: ${T}${reset}"
+    fi
+fi
 
 rm -f ${read_sets}_${kissprefix}_removemeplease 
 rm -f $kissprefix.fa ${kissprefix}_coherent ${kissprefix}_uncoherent
@@ -721,11 +793,11 @@ rm -f ${kissprefix}_uncoherent.fa
 #################### Deal with Downstream analyses ###############################
 ##################################################################################
 
+T="$(date +%s)"
 echo "${yellow}     ###############################################################"
 echo "     ######## CLUSTERING PER LOCUS AND/OR FORMATTING ###############"
 echo "     ###############################################################$reset"
 
-T="$(date +%s)"
 if [[ "$clustering" == "true" ]]; then
     if [[ "$wraith" == "false" ]]; then
         echo "${yellow}Clustering and vcf formmatting$reset"
@@ -740,7 +812,6 @@ if [[ "$clustering" == "true" ]]; then
     if [[ "$wraith" == "false" ]]; then
         echo "${yellow}RAD clustering per locus time in seconds: ${T}$reset"
     fi
-    echo $reset
 else
     if [[ "$wraith" == "false" ]]; then
         echo "${red}NO CLUSTERING (missing -S option)"
@@ -750,7 +821,7 @@ else
         echo "Filtering and vcf formatting$reset"
     fi
     final_output="${kissprefix}.vcf"
-    cmd="python3 $EDIR/../scripts/create_filtered_vcf.py -i ${kissprefix}_raw.fa -o ${final_output} -m ${max_missing} -r ${min_rank}"
+    cmd="python $EDIR/../scripts/create_filtered_vcf.py -i ${kissprefix}_raw.fa -o ${final_output} -m ${max_missing} -r ${min_rank}"
     echo $green$cmd$cyan$reset
     if [[ "$wraith" == "false" ]]; then
         eval $cmd
@@ -773,5 +844,3 @@ if [[ "$wraith" == "false" ]]; then
     echo "      Thanks for using discoSnpRad - http://colibread.inria.fr/discoSnp/ - Forum: http://www.biostars.org/t/discoSnp/"
     echo "     ################################################################################################################${reset}"
 fi
-
-
