@@ -63,7 +63,7 @@ DECODE = bytes.maketrans(bytes(range(5)), b"ACGTN")
 LOWER = b"abcdefghijklmnopqrstuvwxyz\r\n"
 LOWERCASE = b"abcdefghijklmnopqrstuvwxyz"
 HEADER_RE = re.compile(rb">(SNP|INDEL)_(higher|lower)_path_(\d+)")
-RANK_RE = re.compile(rb"rank_([0-9.eE+-]+)")
+RANK_RE = re.compile(rb"rank_([^|\s]+)")
 COUNT_RE = re.compile(rb"\|C\d+_(\d+)")
 UNITIG_RE = re.compile(rb"left_unitig_length_(\d+)\|right_unitig_length_(\d+)")
 CONTIG_RE = re.compile(rb"left_contig_length_(\d+)\|right_contig_length_(\d+)")
@@ -199,6 +199,16 @@ def split_case(line):
     return left, sequence[left:len(sequence) - right], right
 
 
+def parse_rank(header):
+    """rank_ value of a DiscoSnp header, NaN when absent or not a number (kissreads2 writes rank_-nan
+    or rank_nan for a bubble on which no read maps: 0/0)."""
+    match = RANK_RE.search(header)
+    try:
+        return float(match.group(1)) if match else float("nan")
+    except ValueError:
+        return float("nan")
+
+
 def header_meta(header):
     """UL, UR, CL, CR of a DiscoSnp header (-1 when absent)."""
     unitig = UNITIG_RE.search(header)
@@ -263,8 +273,7 @@ def parse_store(fasta_file, with_counts=False, only_ids=None, max_flank=1000):
                 left_lens.append(left_len)
                 right_lens.append(right_len)
             meta.extend(header_meta(pending[2]))
-            rank = RANK_RE.search(pending[2])
-            ranks.append(float(rank.group(1)) if rank else float("nan"))
+            ranks.append(parse_rank(pending[2]))
             if with_counts:
                 for text in (pending[2], this_header):
                     values = list(map(int, COUNT_RE.findall(text)))
