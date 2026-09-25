@@ -102,6 +102,10 @@ wraith="false"
 max_truncated_path_length_difference=0
 option_phase_variants=""
 haplotypes=0
+trim_sites=1          # trim the restriction site remnants at the 5' end of the reads (--no_trim to disable)
+trim_r1="auto"        # nucleotides trimmed from the reads 1, or auto-detected
+trim_r2="auto"        # nucleotides trimmed from the reads 2, or auto-detected
+nb_threads=0
 #######################################################################
 #################### END HEADER                 #######################
 #######################################################################
@@ -184,6 +188,19 @@ function help {
     echo "           Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
     echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
     echo ""
+    echo "RESTRICTION SITES (preprocessing_scripts/trim_restriction_sites.py)"
+    echo "      By default the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI)"
+    echo "      is detected in each read file (first 50000 reads: leading positions where one nucleotide makes >= 90 % of"
+    echo "      the reads, N ignored) and trimmed. Files without such a conserved 5' end (e.g. the sheared reads 2 of a"
+    echo "      single digest RAD) are not trimmed. Trimmed files and a report are written in <prefix>_trimmed_reads/."
+    echo "      --no_trim"
+    echo "           Do not trim the reads."
+    echo "      --trim_r1 <int>"
+    echo "           Trim this number of nucleotides from the 5' end of the reads 1 instead of detecting it."
+    echo "      --trim_r2 <int>"
+    echo "           Trim this number of nucleotides from the 5' end of the reads 2 instead of detecting it."
+    echo "      Reads 2 are the second file of a sample file of files, or the files named *_R2* / *_2.* ."
+    echo ""
     echo "MISC."
     echo "      -u | --max_threads <int>"
     echo "           Max number of used threads. 0 means all threads"
@@ -208,6 +225,19 @@ echo "${yellow}"
 
 while :; do
     case $1 in
+    --no_trim)
+        trim_sites=0
+        ;;
+
+    --trim_r1|--trim_r2)
+        if [ "$2" ] && [[ "$2" =~ ^[0-9]+$ ]] ; then
+            if [ "$1" == "--trim_r1" ]; then trim_r1=$2; else trim_r2=$2; fi
+            shift 1
+        else
+            die 'ERROR: "'$1'" option requires a number of nucleotides.'
+        fi
+        ;;
+
     --max_missing)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then # checks that there exists a second value and its is not the start of the next option
         max_missing=$2
@@ -408,6 +438,7 @@ while :; do
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
             option_cores_gatb="-nb-cores $2"
             option_cores_post_analysis="-t $2"
+            nb_threads=$2
             shift
         else
             die 'ERROR: "'$1'" option requires a non-empty option argument.'
@@ -448,6 +479,37 @@ if [ -z "$read_sets" ]; then
     echo "               **************************************************************************"
     echo $reset
     exit 1
+fi
+
+#######################################################################
+#################### RESTRICTION SITE TRIMMING  #######################
+#######################################################################
+
+if [ $trim_sites -eq 1 ]; then
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ################ RESTRICTION SITE TRIMMING #################"
+    echo "     ############################################################$reset"
+    trimmed_dir=${prefix}_trimmed_reads
+    trimmed_fof=${trimmed_dir}/$(basename ${read_sets})
+    trimCmd="python3 $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads}"
+    echo $green$trimCmd$cyan$reset
+    if [[ "$wraith" == "false" ]]; then
+        $trimCmd
+        if [ $? -ne 0 ]
+        then
+            echo "${red}there was a problem with the restriction site trimming$reset"
+            exit 1
+        fi
+        # the script writes the fof only when at least one file was trimmed
+        if [ -f ${trimmed_fof} ]; then
+            read_sets=${trimmed_fof}
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Restriction site trimming time in seconds: ${T}${reset}"
+    else
+        read_sets=${trimmed_fof}
+    fi
 fi
 
 #Checks if clustering can be performed

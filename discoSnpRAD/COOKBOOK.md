@@ -6,7 +6,8 @@
 * [2. No reference genome - Using only reads 1 from pairs - With clustering](#2)
 * [3. Using a reference genome - Using only reads 1 from pairs - With clustering](#3)
 * [4. Using forward and reverse reads.](#4)
-* [5. Post-processing](#5)
+* [5. Trimming the restriction sites](#5)
+* [6. Post-processing](#6)
 
 - - - -
 
@@ -27,6 +28,10 @@ for i in 1 2 3 4 5; do wget http://bioinformatique.rennes.inria.fr/data_cookbook
 **Note about multiplexed data**
 
 To date, DiscoSnp-RAD is not able to consider multiplexed data. Hence, input files need to be demultiplexed to samples.
+
+**Note about restriction sites**
+
+By default, DiscoSnp-RAD detects and trims the restriction site remnant at the 5' end of the reads before calling variants (see [section 5](#5)). Use `--no_trim` to keep the reads as they are.
 
 - - - -
 
@@ -203,7 +208,50 @@ done
 ls my_fof_set*.txt > my_fof.txt
 ```
 
-## 5. <a name="5">Post-processing</a>
+In this second case, the first file of each sample fof is considered as the reads 1 and the second one as the reads 2 (this matters when giving the trimmed lengths with `--trim_r1` / `--trim_r2`, see [section 5](#5)).
+
+## 5. <a name="5">Trimming the restriction sites</a>
+
+In RAD and ddRAD data, the reads that start at a restriction site all begin with the same few nucleotides, the remnant of the site (e.g. `TGCAG` for PstI, `CGG` for MspI, `AATTC` for EcoRI, `TGCAGG` for SbfI), whatever the locus. These nucleotides are not polymorphic: DiscoSnp-RAD removes them before building the graph. This is done by default, with any of the usages above.
+
+**Automatic detection (default)**
+
+```bash
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt
+```
+
+For each read file, the first 50,000 reads (reads from thousands of loci) are profiled from their 5' end. A position is considered as part of the restriction site when a single nucleotide makes at least 90 % of the reads (or two nucleotides at least 95 %, for degenerate sites such as ApeKI `G^CWGC`). The trimmed length is the length of the leading run of such positions. Then:
+
+* `N` are ignored, and a position that is `N` in most reads (a failed sequencing cycle, frequently the second one) does not stop the detection.
+* the detection is done per file: in single digest RAD data, the reads 2 start at a random (sheared) position, nothing is conserved and they are not trimmed. In ddRAD data, the reads 1 and 2 get the remnant of their own enzyme.
+* an inline barcode still present after demultiplexing is constant within a sample: it is trimmed with the site.
+* files of the same read (reads 1 or reads 2) trimmed to different lengths are reported with a warning.
+* variable length spacers before the site ("heterogeneity spacers", staggered adapters) move the site from read to read: nothing can be detected, the file is not trimmed and a warning is printed. Remove the spacers first (e.g. with your demultiplexing tool), or give the lengths as below.
+
+**Given lengths**
+
+```bash
+# ddRAD PstI - MspI: remove TGCAG from the reads 1 and CGG from the reads 2
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --trim_r1 5 --trim_r2 3
+# single digest RAD SbfI: remove TGCAGG from the reads 1 only
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --trim_r1 6 --trim_r2 0
+```
+
+A length that is not given is still detected automatically. The reads 2 are the second file of a sample fof ([section 4](#4)), or the files named `*_R2*`, `*_2.*`, `*.2.*`; any other file is considered as reads 1.
+
+**No trimming**
+
+```bash
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --no_trim
+```
+
+**Outputs**
+
+The trimmed files are written in `discoRad_trimmed_reads/` (`<prefix>_trimmed_reads/`), with the fof actually used by the pipeline and `trimming_report.tsv`. For each file, this report gives the trimmed length, the trimmed nucleotides (e.g. `TGCAG`, or `TNCAG` with a failed second cycle) and the profile of the first positions: check that they match your enzymes. A file that does not need trimming is not copied. The number and the order of the reads are kept (a read shorter than the trimmed length is replaced by a single `N`), so that the reads 1 and 2 of a pair stay together.
+
+Note that the loci are shorter by the length of the remnants: the variant positions differ from the ones of an untrimmed run (`--no_trim`, or DiscoSnp-RAD versions without trimming).
+
+## 6. <a name="6">Post-processing</a>
 
 A bench of post-processing scripts can be found in the dedicated [directory](https://github.com/GATB/DiscoSnp/tree/master/discoSnpRAD/post-processing_scripts).
 
