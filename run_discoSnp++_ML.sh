@@ -67,7 +67,7 @@ stop_after_kissnp=0
 e=""
 prefix_trash=`head /dev/urandom | tr -dc A-Za-z0-9 | head -c 13 ; echo ''`
 #EDIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
-EDIR=$( python3 -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
+EDIR=$( python -c "import os.path; print(os.path.dirname(os.path.realpath(\"${BASH_SOURCE[0]}\")))" ) # as suggested by Philippe Bordron 
 
 
 if [ -d "$EDIR/build/" ] ; then # VERSION SOURCE COMPILED
@@ -835,7 +835,7 @@ if [[ "$wraith" == "false" ]]; then
         echo -e " Ghost VCF file (1-based) is \""${kissprefix}_coherent.vcf"\""
     else
         echo -e " VCF file (1-based) is \""${kissprefix}_coherent.vcf"\""
-        echo -e " An IGV ready VCF file (sorted by position, only mapped variants, 0-based) is \""${kissprefix}_coherent_for_IGV.vcf"\""
+        echo -e " An IGV ready VCF file (sorted by position, only mapped variants, 1-based) is \""${kissprefix}_coherent_for_IGV.vcf"\""
     fi
     echo -e " Thanks for using discoSnp++ - http://colibread.inria.fr/discoSnp/ - Forum: http://www.biostars.org/t/discoSnp/"
     echo -e "################################################################################################################${reset}"

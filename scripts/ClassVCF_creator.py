@@ -120,6 +120,10 @@ def shift_from_cigar_code(cigarcode, pospol):
 
 class VARIANT():
         """Object corresponding to a discosnp++ bubble"""
+        # True when the P_ positions of the headers already include the left extension (run_VCF_creator.sh -e:
+        # keep_extensions_disco_file.py shifts them by the unitig/contig length and maps the extended paths)
+        positions_include_extensions = False
+
         def __init__(self,line1,line2):
                 self.upper_path = PATH(line1)#line in the file corresponding to the upper path
                 self.lower_path = PATH(line2)#line in the file corresponding to the lower path
@@ -360,6 +364,16 @@ class VARIANT():
                         self.MismatchChecker()
                         return 
                 
+#---------------------------------------------------------------------------------------------------------------------------
+#---------------------------------------------------------------------------------------------------------------------------
+        def UnmappedOffset(self):
+                """Value to add to a 1-based position on the path of an unmapped variant (P_ position + 1) so that
+                the 'mapping position' formulas, written for mapped paths (SAM 1-based position + 1-based position
+                on the path - 1), give the 1-based position of the variant on the path WITH its left extension.
+                Without -e: left extension + 1.  With -e the P_ positions already include the left extension: 1."""
+                if VARIANT.positions_include_extensions:
+                        return 1
+                return max(self.len_unitig_left,self.len_contig_left) + 1
 #---------------------------------------------------------------------------------------------------------------------------
 #---------------------------------------------------------------------------------------------------------------------------
         def RetrieveMappingPositionCouple(self): #Validation SNP second part (specific method for close snps)
@@ -788,7 +802,7 @@ class SNP(VARIANT):
         def WhichPathIsTheRef(self,VCFObject):
                 """Finds which path is identical to the reference genome (with boolRef) and defines it as the ref : specific method for each type of variant"""  
                 VARIANT.WhichPathIsTheRef(self,VCFObject)                
-                posUnmapped = max(self.len_unitig_left,self.len_contig_left) #Takes into account the length of the unitig/contig for the position of unmapped allele (position of the allele on the lower path)
+                posUnmapped = self.UnmappedOffset() #Takes into account the length of the unitig/contig for the position of unmapped allele (1-based, see UnmappedOffset)
                 # self.CheckContigUnitig(self.len_unitig_left,self.len_contig_left) #Takes into account the length of the unitig/contig for the position of unmapped allele (position of the allele on the lower path)
 #---------------------------------------------------------------------------------------------------------------------------
 ##Case : two mapped paths
@@ -904,7 +918,10 @@ class INDEL(VARIANT):
                         
                         # 29 oc 2021, Pierre (bored by this ugly code) : simplified this. This was bugged when used on unmapped INDELs with unitig or contig extensions.
                         self.insertForward = self.longestSequenceForward.strip("acgt")[(int(posD)-1-int(amb)):(int(posD)-int(amb)+int(ind))]
-                        self.insertReverse = ReverseComplement(self.longestSequenceForward.strip("acgt")[(int(posD)-int(amb)):(int(posD)-int(amb)+int(ind))+1])
+                        # Reverse mapping: the left-most representation on the reference is the RIGHT-most one on the path
+                        # (the one of listPosReverse = len(smallest)-posD): the nucleotide following the insertion on the
+                        # path (the anchor once reverse complemented) and the insertion, without the ambiguity shift.
+                        self.insertReverse = ReverseComplement(self.longestSequenceForward.strip("acgt")[int(posD):int(posD)+int(ind)+1])
                         # self.insertReverse = self.longestSequenceReverse.strip("acgt")[len(self.smallestSequence)-int(posD)-1:(len(self.smallestSequence)-int(posD)+int(ind))]
                         self.ntStartForward = self.insertForward[0] #We get the nucleotide just before the insertion by taking into account the possible ambiguity for the position of the indel
                         self.ntStartReverse = self.insertReverse[0]
@@ -915,7 +932,7 @@ class INDEL(VARIANT):
         def WhichPathIsTheRef(self,VCFObject):
                 #Finds the path identical to the reference
                 VARIANT.WhichPathIsTheRef(self,VCFObject)
-                posUnmapped = max(self.len_unitig_left,self.len_contig_left) #Takes into account the lenght of the unitig/contig for the position of unmapped allele (position of the allele on the lower path)
+                posUnmapped = self.UnmappedOffset() #Takes into account the length of the unitig/contig for the position of unmapped allele (1-based, see UnmappedOffset)
                 old_boolRef_Up=None
                 old_boolRef_Low=None
                 #In case of unmapped variant : we have to define a reference
@@ -1034,7 +1051,7 @@ class SNPSCLOSE(VARIANT):
                 VCFObject.phased=True 
                 table = [0] * 10 #Create a 10 cols array
                 tablebis=[]
-                posUnmapped = max(self.len_unitig_left,self.len_contig_left)
+                posUnmapped = self.UnmappedOffset() #Takes into account the length of the unitig/contig for the position of unmapped allele (1-based, see UnmappedOffset)
                 listPositionPolymorphismeOnPathUp = self.upper_path.listPosVariantOnPathToKeep
                 listPositionPolymorphismeOnPathLow = self.lower_path.listPosVariantOnPathToKeep
                 VCFObject.nucleoRef=[]

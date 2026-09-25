@@ -9,7 +9,7 @@ echo "Usage : ./create_IGV_compatible_VCF.sh VCF_file"
 
 echo -e "\t VCF_file: the vcf created by run_VCF_creator"
 echo -e "\t 1/ Remove from this file the unmapped variants"
-echo -e "\t 2/ Make the vcf 0-based"
+echo -e "\t 2/ (positions are kept 1-based, as expected by IGV)"
 echo -e "\t 3/ sort variants by position"
 echo -e "\t-h: print this message"
 }

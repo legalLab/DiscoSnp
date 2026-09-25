@@ -42,6 +42,10 @@ def usage():
 
         -o --output : vcf file 
         -f --output_filtered_SAM : if provided, a SAM file in which uncorrectly mapped prediction (corresponding to filter '.' in the provided VCF) are removed is output in this file.
+        -e --extensions : the P_ positions of the headers already include the left unitig/contig extension
+                          (sam file of predictions mapped with their extensions, run_VCF_creator.sh -e)
+
+        The VCF is 1-based.
         
         """
         print(usage)
@@ -55,7 +59,7 @@ def main():
         VCFFile = None
         ###OPTIONS 
         try:
-                opts, args = getopt.getopt(sys.argv[1:],"s:o:f:h",["help","sam_file=","output=","output_filtered_SAM="])
+                opts, args = getopt.getopt(sys.argv[1:],"s:o:f:he",["help","sam_file=","output=","output_filtered_SAM=","extensions"])
                 if not opts:
                         usage()
                         sys.exit(2)
@@ -93,6 +97,8 @@ def main():
                         else:
                                 sys.stderr.write("!! No filtered sam output !!\n")
                                 sys.exit(2)          
+                elif opt in ("-e","--extensions"):
+                        VARIANT.positions_include_extensions = True
                 else:
                         sys.stderr.write(f"Unknown option {format(opt)}\n")
                         usage()
@@ -179,6 +185,5 @@ def main():
 
 if __name__ == '__main__':
         main()
-        sys.stderr.write(f"VCF file had been generated. Beware, this is a zero-based VCF file.\n")
-        sys.stderr.write(f"Please use 'zero2one.py' script if you wish to obtain a one-based VCF.\n")
+        sys.stderr.write(f"VCF file had been generated (1-based positions).\n")
         

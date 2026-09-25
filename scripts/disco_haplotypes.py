@@ -5,7 +5,9 @@ disco_haplotypes.py
 
 Locus-level post-processing of DiscoSnp++ / DiscoSnpRad bubbles.  The de Bruijn
 graph discovery (kissnp2) is untouched: every bubble stays a pair of paths.
-This script groups the bubbles of a locus on a common coordinate system and
+This script groups the bubbles of a locus on a common coordinate system (the
+bubbles are placed with their lower-case extensions: the contig of a RAD
+locus links SNPs that are too far apart to share a bubble) and
 works on SITES instead of bubbles, which makes it possible to
 
     - merge the pairwise bubbles of a tri/tetra-allelic site into one record,
@@ -23,7 +25,9 @@ Three sub-commands:
             per-bubble read counts and the phased facts into per-site allele
             depths, calls multi-allelic genotypes, phases them and writes
             <out>.vcf, <out>.tsv (haplotypes, loci with >= 2 sites only),
-            <out>_loci.tsv and <out>_loci.fa
+            <out>_loci.tsv, <out>_loci.fa (whole locus, IUPAC codes at the
+            sites) and <out>_alleles.fa (the haplotypes of every locus as whole
+            sequences: most frequent one = higher path, the others = lower paths)
   strip     Removes the synthetic bubbles from a fasta file, so that the usual
             DiscoSnp VCF is unchanged.
 
@@ -57,12 +61,20 @@ COMP = np.full(256, PAD, dtype=np.uint8)
 COMP[:5] = (3, 2, 1, 0, 4)
 DECODE = bytes.maketrans(bytes(range(5)), b"ACGTN")
 LOWER = b"abcdefghijklmnopqrstuvwxyz\r\n"
+LOWERCASE = b"abcdefghijklmnopqrstuvwxyz"
 HEADER_RE = re.compile(rb">(SNP|INDEL)_(higher|lower)_path_(\d+)")
 RANK_RE = re.compile(rb"rank_([0-9.eE+-]+)")
 COUNT_RE = re.compile(rb"\|C\d+_(\d+)")
+UNITIG_RE = re.compile(rb"left_unitig_length_(\d+)\|right_unitig_length_(\d+)")
+CONTIG_RE = re.compile(rb"left_contig_length_(\d+)\|right_contig_length_(\d+)")
 COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+IUPAC = {frozenset(k): v for k, v in (("A", "A"), ("C", "C"), ("G", "G"), ("T", "T"),
+                                      ("AG", "R"), ("CT", "Y"), ("CG", "S"), ("AT", "W"), ("GT", "K"), ("AC", "M"),
+                                      ("CGT", "B"), ("AGT", "D"), ("ACT", "H"), ("ACG", "V"), ("ACGT", "N"))}
 ERROR_RATE = 0.01
-MAX_PATH_LENGTH = 1000
+MAX_PATH_LENGTH = 1000                       # upper-case part of a path
+MAX_FLANK = 1500                             # lower-case extension kept on each side for the placement
+OFFSET_BITS = 13                             # placement offsets (full sequences) must fit in +-2^12
 CHUNK_ROWS = 50000                           # rows (paths) handled at once by the numpy steps
 
 
@@ -84,20 +96,57 @@ def log(message):
 ###############################################################################
 
 class BubbleStore:
-    """Bubble i: higher path = row 2i, lower path = row 2i+1 of P (codes, PAD padded)."""
+    """Bubble i: higher path = row 2i, lower path = row 2i+1 of P (codes, PAD padded).
 
-    def __init__(self, ids, P, lens, counts, ranks):
+    P holds the upper-case part of the paths (the part kissreads2 maps reads on):
+    every position used by the script is a position in it.  F holds the same
+    paths with their lower-case extensions (capped to max_flank on each side),
+    only used to place the bubbles of a locus with respect to each other:
+    upper-case position 0 is at F position fstart.
+    """
+
+    def __init__(self, ids, P, lens, counts, ranks, F, flens, fstart, left, right, meta):
         self.ids = ids                  # int64 [n]   bubble ids of the fasta headers
         self.P = P                      # uint8 [2n, Lmax]
         self.lens = lens                # int32 [2n]
         self.counts = counts            # uint16 [2n, S] read counts of kissreads2, or None
-        self.ranks = ranks              # float32 [n]
+        self.ranks = ranks              # float64 [n]
+        self.F = F                      # uint8 [2n, Fmax] paths with their (capped) extensions
+        self.flens = flens              # int32 [2n]
+        self.fstart = fstart            # int32 [2n]  start of the upper-case part in F
+        self.left = left                # int32 [2n]  real length of the left extension (not capped)
+        self.right = right              # int32 [2n]  real length of the right extension
+        self.meta = meta                # int32 [n, 4] UL, UR, CL, CR of the header (-1: absent)
         self.n = len(ids)
         self.nsamples = 0 if counts is None else counts.shape[1]
         self.max_len = P.shape[1] if self.n else 0
+        self.max_flen = F.shape[1] if self.n else 0
         max_id = int(ids.max()) if self.n else 0
         self.by_id = np.full(max_id + 1, -1, dtype=np.int64)
         self.by_id[ids] = np.arange(self.n)
+
+    def extended(self, other, keep):
+        """A new store: this one followed by the bubbles `keep` (bool [other.n]) of `other`."""
+        rows = np.repeat(2 * np.nonzero(keep)[0], 2) + np.tile([0, 1], int(keep.sum()))
+
+        def stack(a, b):
+            width = max(a.shape[1], b.shape[1])
+            out = np.full((len(a) + len(b), width), PAD, dtype=np.uint8)
+            out[:len(a), :a.shape[1]] = a
+            out[len(a):, :b.shape[1]] = b
+            return out
+
+        return BubbleStore(np.concatenate([self.ids, other.ids[keep]]),
+                           stack(self.P, other.P[rows]),
+                           np.concatenate([self.lens, other.lens[rows]]),
+                           np.concatenate([self.counts, other.counts[rows]]),
+                           np.concatenate([self.ranks, other.ranks[keep]]),
+                           stack(self.F, other.F[rows]),
+                           np.concatenate([self.flens, other.flens[rows]]),
+                           np.concatenate([self.fstart, other.fstart[rows]]),
+                           np.concatenate([self.left, other.left[rows]]),
+                           np.concatenate([self.right, other.right[rows]]),
+                           np.concatenate([self.meta, other.meta[keep]]))
 
     def index_of(self, bubble_id):
         """Index of a bubble id, -1 when absent."""
@@ -118,13 +167,56 @@ class BubbleStore:
         return np.split(cols, splits)
 
 
-def parse_store(fasta_file, with_counts=False, only_ids=None):
+def pack_rows(buf, lens):
+    """Concatenated sequences -> uint8 codes [rows, max length], PAD padded."""
+    n_rows = len(lens)
+    max_len = int(lens.max()) if n_rows else 0
+    out = np.full((n_rows, max_len), PAD, dtype=np.uint8)
+    codes = CODE[np.frombuffer(buf, dtype=np.uint8)]
+    starts = np.zeros(n_rows + 1, dtype=np.int64)
+    np.cumsum(lens, out=starts[1:])
+    if n_rows and (lens == max_len).all():
+        out[:] = codes.reshape(n_rows, max_len)              # the usual case: closed bubbles, one length
+    else:
+        for r0 in range(0, n_rows, 20000):
+            r1 = min(n_rows, r0 + 20000)
+            chunk_lens = lens[r0:r1]
+            total = int(starts[r1] - starts[r0])
+            rows = np.repeat(np.arange(r0, r1, dtype=np.int32), chunk_lens)
+            cols = (np.arange(total, dtype=np.int32)
+                    - np.repeat((starts[r0:r1] - starts[r0]).astype(np.int32), chunk_lens))
+            out[rows, cols] = codes[starts[r0]:starts[r1]]
+    return out
+
+
+def split_case(line):
+    """A DiscoSnp path 'lowerUPPERlower' -> (length of the left extension, upper-case part, length of the right one)."""
+    sequence = line.rstrip(b"\r\n")
+    left = len(sequence) - len(sequence.lstrip(LOWERCASE))
+    right = len(sequence) - len(sequence.rstrip(LOWERCASE))
+    if left == len(sequence):                    # no upper-case part at all
+        return 0, sequence.upper(), 0
+    return left, sequence[left:len(sequence) - right], right
+
+
+def header_meta(header):
+    """UL, UR, CL, CR of a DiscoSnp header (-1 when absent)."""
+    unitig = UNITIG_RE.search(header)
+    contig = CONTIG_RE.search(header)
+    return ((int(unitig.group(1)), int(unitig.group(2))) if unitig else (-1, -1)) + \
+           ((int(contig.group(1)), int(contig.group(2))) if contig else (-1, -1))
+
+
+def parse_store(fasta_file, with_counts=False, only_ids=None, max_flank=1000):
     """Read a DiscoSnp fasta file into a BubbleStore (SNP bubbles only).
 
     only_ids: sorted int64 array, keep these bubble ids only.
+    max_flank: lower-case extension kept on each side (placement only).
     """
-    ids, ranks, lens = array.array("q"), array.array("f"), array.array("i")
-    counts, buf = array.array("H"), bytearray()
+    ids, ranks, lens = array.array("q"), array.array("d"), array.array("i")
+    flens, fstart, left_lens, right_lens = array.array("i"), array.array("i"), array.array("i"), array.array("i")
+    meta = array.array("i")
+    counts, buf, fbuf = array.array("H"), bytearray(), bytearray()
     nsamples = None
     pending = None                  # (id, path, header) of a higher path waiting for its lower path
     header = None
@@ -149,17 +241,28 @@ def parse_store(fasta_file, with_counts=False, only_ids=None):
                 if position >= len(only_ids) or only_ids[position] != bubble_id:
                     continue
             path = line.translate(None, LOWER)       # upper-case part only, fast C-level deletion
+            left, _, right = split_case(line)
+            sequence = line.rstrip(b"\r\n")
+            kept_left, kept_right = min(left, max_flank), min(right, max_flank)
+            full = sequence[left - kept_left:len(sequence) - right + kept_right]
             if level == b"higher":
-                pending = (bubble_id, path, this_header)
+                pending = (bubble_id, path, this_header, full, kept_left, left, right)
                 continue
             if pending is None or pending[0] != bubble_id:
                 sys.exit(f"ERROR: lower path {bubble_id} is not preceded by its higher path in {fasta_file}")
             if max(len(path), len(pending[1])) > MAX_PATH_LENGTH:
                 sys.exit(f"ERROR: bubble {bubble_id} has an upper-case path longer than {MAX_PATH_LENGTH} nt")
             ids.append(bubble_id)
-            for sequence in (pending[1], path):
+            for sequence, full_sequence, start, left_len, right_len in (pending[1:2] + pending[3:],
+                                                                         (path, full, kept_left, left, right)):
                 buf += sequence
                 lens.append(len(sequence))
+                fbuf += full_sequence
+                flens.append(len(full_sequence))
+                fstart.append(start)
+                left_lens.append(left_len)
+                right_lens.append(right_len)
+            meta.extend(header_meta(pending[2]))
             rank = RANK_RE.search(pending[2])
             ranks.append(float(rank.group(1)) if rank else float("nan"))
             if with_counts:
@@ -179,33 +282,25 @@ def parse_store(fasta_file, with_counts=False, only_ids=None):
     n = len(ids)
     ids = np.array(ids, dtype=np.int64)
     lens = np.array(lens, dtype=np.int32)
-    ranks = np.array(ranks, dtype=np.float32)
-    max_len = int(lens.max()) if n else 0
-    P = np.full((2 * n, max_len), PAD, dtype=np.uint8)
-    codes = CODE[np.frombuffer(buf, dtype=np.uint8)]
-    starts = np.zeros(2 * n + 1, dtype=np.int64)
-    np.cumsum(lens, out=starts[1:])
-    if n and (lens == max_len).all():
-        P[:] = codes.reshape(2 * n, max_len)              # the usual case: closed bubbles, one length
-    else:
-        for r0 in range(0, 2 * n, 20000):
-            r1 = min(2 * n, r0 + 20000)
-            chunk_lens = lens[r0:r1]
-            total = int(starts[r1] - starts[r0])
-            rows = np.repeat(np.arange(r0, r1, dtype=np.int32), chunk_lens)
-            cols = (np.arange(total, dtype=np.int32)
-                    - np.repeat((starts[r0:r1] - starts[r0]).astype(np.int32), chunk_lens))
-            P[rows, cols] = codes[starts[r0]:starts[r1]]
-    del buf, codes
+    flens = np.array(flens, dtype=np.int32)
+    ranks = np.array(ranks, dtype=np.float64)
+    P = pack_rows(buf, lens)
+    F = pack_rows(fbuf, flens)
+    del buf, fbuf
+    if F.shape[1] >= 1 << (OFFSET_BITS - 1):
+        sys.exit(f"ERROR: paths with their extensions longer than {(1 << (OFFSET_BITS - 1)) - 1} nt: lower --max_flank")
     if with_counts:
         if n and not nsamples:
             sys.exit(f"ERROR: no read counts (C1_, C2_...) in the headers of {fasta_file}: is this a kissreads2 output?")
         counts = np.frombuffer(counts, dtype=np.uint16).reshape(2 * n, nsamples or 0)
     else:
         counts = None
-    store = BubbleStore(ids, P, lens, counts, ranks)
+    store = BubbleStore(ids, P, lens, counts, ranks, F, flens,
+                        np.array(fstart, dtype=np.int32), np.array(left_lens, dtype=np.int32),
+                        np.array(right_lens, dtype=np.int32), np.array(meta, dtype=np.int32).reshape(n, 4))
     log(f"[{os.path.basename(fasta_file)}] {n} SNP bubbles read ({n_indel} INDEL bubbles ignored),"
-        f" longest path {max_len} nt" + (f", {nsamples} read sets" if with_counts else ""))
+        f" longest path {store.max_len} nt ({store.max_flen} nt with its extensions)"
+        + (f", {nsamples} read sets" if with_counts else ""))
     return store
 
 
@@ -256,59 +351,93 @@ def revcomp_rows(rows, lens):
     return out
 
 
+OFFSET_SHIFT = 1 << (OFFSET_BITS - 1)
+
+
 def pack_keys(qb, tb, o, rel):
-    """(query bubble, target bubble, oriented offset, orientation) -> one uint64."""
+    """(query bubble, target bubble, oriented offset, orientation) -> one uint64 (25 + 25 + 13 + 1 bits)."""
     flipped = np.broadcast_to(np.asarray(rel) < 0, qb.shape).astype(np.uint64)
-    return ((qb.astype(np.uint64) << np.uint64(38)) | (tb.astype(np.uint64) << np.uint64(12))
-            | ((o + 1024).astype(np.uint64) << np.uint64(1)) | flipped)
+    return ((qb.astype(np.uint64) << np.uint64(OFFSET_BITS + 26)) | (tb.astype(np.uint64) << np.uint64(OFFSET_BITS + 1))
+            | ((o + OFFSET_SHIFT).astype(np.uint64) << np.uint64(1)) | flipped)
 
 
 def unpack_keys(keys):
-    qb = (keys >> np.uint64(38)).astype(np.int64)
-    tb = ((keys >> np.uint64(12)) & np.uint64((1 << 26) - 1)).astype(np.int64)
-    o = ((keys >> np.uint64(1)) & np.uint64(2047)).astype(np.int64) - 1024
+    qb = (keys >> np.uint64(OFFSET_BITS + 26)).astype(np.int64)
+    tb = ((keys >> np.uint64(OFFSET_BITS + 1)) & np.uint64((1 << 25) - 1)).astype(np.int64)
+    o = ((keys >> np.uint64(1)) & np.uint64((1 << OFFSET_BITS) - 1)).astype(np.int64) - OFFSET_SHIFT
     rel = np.where(keys & np.uint64(1), -1, 1).astype(np.int64)
     return qb, tb, o, rel
 
 
-def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_candidates=64):
+def unique_edges(b1, b2, shift, rel):
+    """Remove the duplicated (b1, b2, shift, rel) edges."""
+    if not len(b1):
+        return b1, b2, shift, rel
+    order = np.lexsort((rel, shift, b2, b1))
+    b1, b2, shift, rel = b1[order], b2[order], shift[order], rel[order]
+    keep = np.ones(len(b1), dtype=bool)
+    keep[1:] = (b1[1:] != b1[:-1]) | (b2[1:] != b2[:-1]) | (shift[1:] != shift[:-1]) | (rel[1:] != rel[:-1])
+    return b1[keep], b2[keep], shift[keep], rel[keep]
+
+
+def seed_windows(rows, flens, fstart, ulens, higher, k, sampling, query):
+    """The k-windows of a chunk of paths used as seeds: (codes, row in chunk, position).
+
+    In the upper-case part: every window when querying, one every k (and the last
+    one) when indexing, so that two upper-case parts sharing k exact nucleotides
+    always meet.  In the extensions: the windows whose hash is 0 modulo
+    `sampling`, on the higher paths only (both paths share their extensions),
+    the same windows on both sides: extensions overlapping over a few hundred
+    nucleotides share several of them.
+    """
+    codes, valid = window_codes(rows, k)
+    if not codes.shape[1]:
+        return codes[:, :0].ravel(), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    position = np.arange(codes.shape[1])[None, :]
+    first = fstart[:, None]
+    last = (fstart + ulens - k)[:, None]
+    upper = (position >= first) & (position <= last)
+    if not query:
+        upper &= ((position - first) % k == 0) | (position == last)
+    hashed = (codes * np.uint32(2654435761)) >> np.uint32(16)
+    sampled = (hashed % np.uint32(sampling) == 0) & higher[:, None]
+    r, c = np.nonzero(valid & (upper | sampled))
+    return codes[r, c], r, c
+
+
+def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_divergence=0.02, sampling=8,
+                   max_candidates=64):
     """Edges between bubbles whose paths overlap, from the sequences alone.
 
-    Links the pairwise bubbles of a multi-allelic site (they start at the same
-    place, and kissreads2 never reports two bubbles starting at the same read
-    position in a fact) and is the only source of links before kissreads2 runs.
-    Seeds are taken every seed_size positions (and at the end) of every path
-    and indexed in sorted arrays; every path is then scanned in both directions
-    and a candidate placement is accepted when the best of the 2 x 2 path pairs
-    agrees over the whole overlap, up to max_mismatches (other alleles of the
-    locus) and 10 % of the overlap.
-    Returns (b1, b2, shift, rel) int64 arrays with b1 < b2 (bubble indices).
+    The paths are compared WITH their lower-case extensions (kissnp2 -t/-T): the
+    bubbles of a RAD locus are often too far apart for their upper-case parts to
+    overlap, but they share the contig of the locus.  This also links the
+    pairwise bubbles of a multi-allelic site, which start at the same place.
+    Seeds are indexed in sorted arrays (see seed_windows); every path is scanned
+    in both directions and a candidate placement is accepted when the best of the
+    2 x 2 path pairs agrees over the whole overlap, up to max_mismatches plus
+    max_divergence x overlap (other alleles of the locus in the extensions), and
+    10 % of the overlap.
+    Returns (b1, b2, shift, rel) int64 arrays with b1 < b2 (bubble indices):
+    upper-case position 0 of b2 is at upper-case position <shift> of b1.
     """
     empty = tuple(np.zeros(0, dtype=np.int64) for _ in range(4))
-    n, P, lens, k = store.n, store.P, store.lens, seed_size
-    if n < 2 or store.max_len < k:
+    n, F, flens, fstart, lens, k = store.n, store.F, store.flens, store.fstart, store.lens, seed_size
+    if n < 2 or store.max_flen < k:
         return empty
     if store.n >= (1 << 25):
         sys.exit("ERROR: more than 33 million bubbles are not supported by the edge search")
+    higher_row = np.arange(2 * n) % 2 == 0
 
-    # ---- index: seeds at offsets 0, k, 2k... and at the end of every path
+    # ---- index
     seeds, rows, offs = [], [], []
     for r0 in range(0, 2 * n, CHUNK_ROWS):
         r1 = min(2 * n, r0 + CHUNK_ROWS)
-        codes, valid = window_codes(P[r0:r1], k)
-        last = lens[r0:r1].astype(np.int64) - k
-        for offset in range(0, codes.shape[1], k):
-            selected = (last >= offset) & valid[:, offset]
-            seeds.append(codes[selected, offset])
-            rows.append(np.nonzero(selected)[0] + r0)
-            offs.append(np.full(int(selected.sum()), offset, dtype=np.int16))
-        selected = (last >= 0) & (last % k != 0)
-        r = np.nonzero(selected)[0]
-        l = last[r]
-        ok = valid[r, l]
-        seeds.append(codes[r[ok], l[ok]])
-        rows.append(r[ok] + r0)
-        offs.append(l[ok].astype(np.int16))
+        codes, r, c = seed_windows(F[r0:r1], flens[r0:r1], fstart[r0:r1], lens[r0:r1], higher_row[r0:r1],
+                                   k, sampling, query=False)
+        seeds.append(codes)
+        rows.append(r + r0)
+        offs.append(c.astype(np.int16))
     seeds, rows, offs = (np.concatenate(a) for a in (seeds, rows, offs))
     order = np.argsort(seeds, kind="stable")
     seeds, rows, offs = seeds[order], rows[order].astype(np.int32), offs[order]
@@ -319,16 +448,18 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_candidates
     seeds, rows, offs = seeds[keep], rows[keep], offs[keep]
     del keep, counts
 
-    # ---- query: every window of every path, both orientations
+    # ---- query: both orientations
     all_keys = []
     n_hits = 0
     for b0 in range(0, n, CHUNK_ROWS // 2):
         r0, r1 = 2 * b0, 2 * min(n, b0 + CHUNK_ROWS // 2)
-        chunk, chunk_lens = P[r0:r1], lens[r0:r1]
-        for rel, oriented in ((1, chunk), (-1, revcomp_rows(chunk, chunk_lens))):
-            codes, valid = window_codes(oriented, k)
-            qrow, qpos = np.nonzero(valid)
-            qcodes = codes[qrow, qpos]
+        chunk, chunk_flens = F[r0:r1], flens[r0:r1]
+        chunk_fstart, chunk_lens = fstart[r0:r1], lens[r0:r1]
+        for rel, oriented, oriented_start in ((1, chunk, chunk_fstart),
+                                              (-1, revcomp_rows(chunk, chunk_flens),
+                                               chunk_flens - chunk_fstart - chunk_lens)):
+            qcodes, qrow, qpos = seed_windows(oriented, chunk_flens, oriented_start, chunk_lens,
+                                              higher_row[r0:r1], k, sampling, query=True)
             lo = np.searchsorted(seeds, qcodes, "left")
             hi = np.searchsorted(seeds, qcodes, "right")
             hits = hi - lo
@@ -365,18 +496,18 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_candidates
     for rel_v, o_v in groups.tolist():
         selected = np.nonzero((rel == rel_v) & (o == o_v))[0]
         a, b = max(0, o_v), max(0, -o_v)
-        width = store.max_len - max(a, b)
+        width = store.max_flen - max(a, b)
         if width <= 0:
             continue
         group_mm = np.full(len(selected), 10 ** 6, dtype=np.int32)
         group_ov = np.zeros(len(selected), dtype=np.int32)
         for qi in (0, 1):
-            Q = P[2 * qb[selected] + qi]
+            Q = F[2 * qb[selected] + qi]
             if rel_v == -1:
-                Q = revcomp_rows(Q, lens[2 * qb[selected] + qi])
+                Q = revcomp_rows(Q, flens[2 * qb[selected] + qi])
             QS = Q[:, a:a + width]
             for ti in (0, 1):
-                TS = P[2 * tb[selected] + ti][:, b:b + width]
+                TS = F[2 * tb[selected] + ti][:, b:b + width]
                 valid = (QS != PAD) & (TS != PAD)
                 overlap = valid.sum(axis=1).astype(np.int32)
                 mismatches = ((QS != TS) & valid).sum(axis=1).astype(np.int32)
@@ -384,11 +515,14 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_candidates
                 group_mm = np.where(better, mismatches, group_mm)
                 group_ov = np.where(better, overlap, group_ov)
         best_mm[selected], best_ov[selected] = group_mm, group_ov
-    accepted = (best_ov >= min_overlap) & (best_mm <= max_mismatches) & (best_mm * 10 <= best_ov)
+    accepted = ((best_ov >= min_overlap) & (best_mm * 10 <= best_ov)
+                & (best_mm <= max_mismatches + np.floor(max_divergence * best_ov)))
     qb, tb, o, rel, best_mm, best_ov = (a[accepted] for a in (qb, tb, o, rel, best_mm, best_ov))
     if not len(qb):
         return empty
-    shift = np.where(rel == 1, o, lens[2 * qb].astype(np.int64) - 1 - o)
+    # from full-path offsets to upper-case coordinates
+    fq, ft = fstart[2 * qb].astype(np.int64), fstart[2 * tb].astype(np.int64)
+    shift = np.where(rel == 1, o + ft - fq, flens[2 * qb].astype(np.int64) - 1 - o - ft - fq)
 
     # ---- one placement per bubble pair, normalised to b1 < b2
     order = np.lexsort((-best_ov, best_mm, tb, qb))
@@ -399,8 +533,7 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_candidates
     swap = qb > tb
     b1, b2 = np.where(swap, tb, qb), np.where(swap, qb, tb)
     shift = np.where(swap, -rel * shift, shift)
-    keys = np.unique(pack_keys(b1, b2, shift, rel))
-    b1, b2, shift, rel = unpack_keys(keys)
+    b1, b2, shift, rel = unique_edges(b1, b2, shift, rel)
     log(f"[edges] {len(b1)} sequence overlaps between bubbles ({n_hits} seed hits,"
         f" {n_repetitive} repetitive seeds ignored)")
     return b1, b2, shift, rel
@@ -530,13 +663,13 @@ def fact_edges(fact_files, store):
                         b1, b2 = (p_index, index) if p_index < index else (index, p_index)
                         if p_index > index:
                             shift = -rel * shift
-                        keys.add((b1 << 38) | (b2 << 12) | ((shift + 1024) << 1) | (rel < 0))
+                        keys.add((b1, b2, shift, rel))
                     previous = (start, length, sign, index, zero)
     if n_unknown:
         log(f"[facts] {n_unknown} fact tokens name bubbles absent from the fasta files (ignored)")
     if not keys:
         return tuple(np.zeros(0, dtype=np.int64) for _ in range(4))
-    return unpack_keys(np.array(sorted(keys), dtype=np.uint64))
+    return tuple(np.array(column, dtype=np.int64) for column in zip(*sorted(keys)))
 
 
 ###############################################################################
@@ -547,7 +680,7 @@ class Bubble:
     """A bubble materialised from the store (only for bubbles of multi-bubble loci)."""
 
     __slots__ = ("id", "index", "store", "paths", "snps", "headers", "sequences",
-                 "parent", "anchor", "orient", "locus")
+                 "parent", "anchor", "orient", "locus", "left", "right", "full")
 
     def __init__(self, store, index):
         self.id = int(store.ids[index])
@@ -562,6 +695,17 @@ class Bubble:
         self.anchor = None              # locus coordinate of path position 0
         self.orient = 1                 # +1 / -1 : direction of the path in the locus
         self.locus = None
+        self.left = int(store.left[2 * index])      # lower-case extensions of the higher path
+        self.right = int(store.right[2 * index])
+        self.full = None                # higher path with its extensions (case kept), see load_full_paths
+
+    def extent(self):
+        """First and last path positions of the bubble, extensions included (position 0 = upper case start)."""
+        return -self.left, max(map(len, self.paths)) + self.right - 1
+
+    @property
+    def meta(self):
+        return self.store.meta[self.index].tolist()
 
     @property
     def rank(self):
@@ -661,11 +805,13 @@ def build_loci(bubbles, edges):
     for locus in loci:
         locus.conflicts //= 2   # every edge is walked from both sides
         locus.bubbles.sort(key=lambda b: b.index)
-        lowest = min(min(b.anchor, b.coordinate(max(map(len, b.paths)) - 1)) for b in locus.bubbles)
+        # the coordinates of the locus cover the extensions of its bubbles: position 1 of the
+        # VCF is the first nucleotide of the locus sequence (lower case included)
+        lowest = min(min(map(b.coordinate, b.extent())) for b in locus.bubbles)
         highest = 0
         for bubble in locus.bubbles:
             bubble.anchor -= lowest
-            highest = max(highest, bubble.anchor, bubble.coordinate(max(map(len, bubble.paths)) - 1))
+            highest = max(highest, max(map(bubble.coordinate, bubble.extent())))
         locus.length = highest + 1
         sites = defaultdict(lambda: defaultdict(list))
         for bubble in locus.bubbles:
@@ -678,17 +824,49 @@ def build_loci(bubbles, edges):
     return loci
 
 
-def locus_sequence(locus, reference_alleles):
-    """Consensus of the locus: the paths laid on the coordinates, REF allele at the sites."""
-    sequence = ["N"] * locus.length
+def load_full_paths(fasta_file, bubbles):
+    """Fill bubble.full (higher path with its extensions, case kept) for {bubble id: Bubble}."""
+    with open(fasta_file, "rb") as handle:
+        header = None
+        for line in handle:
+            if line[:1] == b">":
+                header = line
+                continue
+            if header is not None and header.startswith(b">SNP_higher_path_"):
+                match = HEADER_RE.match(header)
+                bubble = bubbles.get(int(match.group(3))) if match else None
+                if bubble is not None:
+                    bubble.full = line.rstrip(b"\r\n").decode()
+            header = None
+
+
+def iupac(alleles):
+    return IUPAC.get(frozenset(alleles), "N")
+
+
+def locus_sequence(locus, site_nucleotides):
+    """The whole locus (extensions included): majority nucleotide of the real bubbles
+    laid on the locus coordinates, upper case where one of them is upper case.
+    site_nucleotides: {coordinate: nucleotide or IUPAC code} written at the sites.
+    """
+    counts = np.zeros((5, locus.length), dtype=np.int32)
+    upper = np.zeros(locus.length, dtype=bool)
     for bubble in locus.bubbles:
-        for position in range(len(bubble.paths[0])):
-            coordinate = bubble.coordinate(position)
-            if sequence[coordinate] == "N":
-                sequence[coordinate] = bubble.nucleotide(0, coordinate)
-    for coordinate, nucleotide in reference_alleles.items():
+        if bubble.parent is not None or bubble.full is None:
+            continue                    # synthetic bubbles only repeat pieces of their parent
+        codes = CODE[np.frombuffer(bubble.full.encode(), dtype=np.uint8)]
+        is_upper = np.frombuffer(bubble.full.encode(), dtype=np.uint8) < ord("a")
+        if bubble.orient == -1:
+            codes, is_upper = COMP[codes][::-1], is_upper[::-1]
+        start = min(map(bubble.coordinate, bubble.extent()))
+        span = np.arange(start, start + len(codes))
+        counts[np.minimum(codes, 4), span] += 1
+        upper[span] |= is_upper
+    consensus = np.where(counts[:4].sum(axis=0) > 0, counts[:4].argmax(axis=0), 4)
+    sequence = list(bytes(consensus.astype(np.uint8)).translate(DECODE).decode())
+    for coordinate, nucleotide in site_nucleotides.items():
         sequence[coordinate] = nucleotide
-    return "".join(sequence)
+    return "".join(c if u else c.lower() for c, u in zip(sequence, upper.tolist()))
 
 
 def snp_counts(store):
@@ -787,8 +965,9 @@ def sub_bubble(bubble, snp_index, locus, max_contexts):
 
 
 def augment(args):
-    store = parse_store(args.input)
-    edges = sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap)
+    store = parse_store(args.input, max_flank=args.max_flank)
+    edges = sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap,
+                           args.max_divergence, args.seed_sampling)
     loci, materialised = multi_bubble_loci(store, edges, args.max_locus_bubbles, lone_multi_snp=True)
     loci = [locus for locus in loci if len(locus.sites) > 1]
     for number, locus in enumerate(loci, 1):
@@ -1085,7 +1264,41 @@ def cached_fragments(text, cache, by_id, site_specific_of, stats, site_facts=Fal
     return value
 
 
-def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, locus_file, fasta, site_files=()):
+def info_field(rank, meta, cluster, cluster_size, n_real, n_synthetic, bubble_ids, n_sites, conflicts):
+    """INFO of a site: the fields of the discoSnpRad clustered VCF, then the locus-level ones."""
+    ul, ur, cl, cr = ("." if v < 0 else v for v in meta)
+    rank = "." if rank is None or math.isnan(rank) else rank
+    return (f"Ty=SNP;Rk={rank};UL={ul};UR={ur};CL={cl};CR={cr};Genome=.;Sd=.;Cluster={cluster};ClSize={cluster_size};"
+            f"NB={n_real};NX={n_synthetic};BUB={','.join(map(str, bubble_ids))};NSITES={n_sites};PC={conflicts}")
+
+
+def write_alleles(handle, name, header, template, coordinates, copies, reference, partial=None):
+    """The alleles (haplotypes) of a locus as whole locus sequences: the most frequent one as the
+    higher path, the others as lower paths 1, 2...
+    copies : Counter {haplotype: copies in the fully resolved genotypes}
+    partial: Counter {haplotype: copies} of the partially resolved genotypes, written after them
+             (status_partial): IUPAC code at the heterozygous sites that could not be phased,
+             N at the sites without genotype.
+    Without any genotype, the haplotype of the REF alleles is written alone (copies_0).
+    """
+    def order(counter):
+        return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0] != reference, kv[0]))
+
+    haplotypes = [(h, n, "resolved") for h, n in order(copies)] + \
+                 [(h, n, "partial") for h, n in order(partial or Counter())]
+    if not haplotypes:
+        haplotypes = [(reference, 0, "reference")]
+    for rank, (haplotype, n_copies, status) in enumerate(haplotypes):
+        sequence = list(template)
+        for coordinate, nucleotide in zip(coordinates, haplotype):
+            sequence[coordinate] = nucleotide
+        path = f"{name}_higher_path" if rank == 0 else f"{name}_lower_path_{rank}"
+        handle.write(f">{path}|haplotype_{haplotype}|copies_{n_copies}|status_{status}|{header}\n"
+                     f"{''.join(sequence)}\n")
+
+
+def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, locus_file, fasta, alleles_fasta,
+                    site_files=()):
     """Everything for the loci with several bubbles.  Returns the number of loci written."""
     data = [LocusData(locus) for locus in loci]
     site_specific_of = {d.locus.name: d.site_specific for d in data}
@@ -1172,14 +1385,16 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
             GQ[sites, sample] = gq
             PL[site_pl[sites][:, None] + np.arange(pl.shape[1])[None, :], sample] = pl
         # phasing: only the loci where this sample has two or more heterozygous sites need it;
-        # elsewhere every called site is trivially phased, phase set = first called site
+        # elsewhere every called site of a locus with several sites is trivially phased, phase
+        # set = first called site.  The site of a single-site locus is not phased ('/'): there
+        # is nothing to be phased with.
         gt_sample = GT[:, sample]
         called_sites = gt_sample[:, 0] >= 0
         het_sites = called_sites & (gt_sample[:, 0] != gt_sample[:, 1])
         n_het = np.add.reduceat(het_sites.astype(np.int64), locus_site_base[:-1])
         n_het[np.diff(locus_site_base) == 0] = 0
         first_called = np.minimum.reduceat(np.where(called_sites, site_coordinate, 1 << 40), locus_site_base[:-1])
-        trivial = (n_het < 2)[locus_of_site] & called_sites
+        trivial = ((n_het < 2) & (np.diff(locus_site_base) > 1))[locus_of_site] & called_sites
         PH[trivial, sample] = True
         PS[trivial, sample] = first_called[locus_of_site[trivial]] + 1
         for locus_index in np.nonzero(n_het >= 2)[0].tolist():
@@ -1227,10 +1442,13 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
             A = len(alleles)
             n_multiallelic += A > 2
             involved = {b for cs in locus.sites[coordinate].values() for b, _ in cs}
-            real = sorted(b.id for b in involved if b.parent is None)
-            ranks = [b.rank for b in involved if b.rank is not None]
-            info = (f"NB={len(real)};NX={len(involved) - len(real)};BUB={','.join(map(str, real))};"
-                    f"RK={max(ranks) if ranks else '.'};NSITES={len(d.coordinates)};PC={locus.conflicts}")
+            real = [b for b in involved if b.parent is None] or list(involved)
+            best = max(real, key=lambda b: -1.0 if b.rank is None else b.rank)
+            info = info_field(best.rank, best.meta, number, 2 * d.n_real,
+                              sum(1 for b in involved if b.parent is None),
+                              sum(1 for b in involved if b.parent is not None),
+                              sorted(b.id for b in involved if b.parent is None),
+                              len(d.coordinates), locus.conflicts)
             columns = [locus.name, str(coordinate + 1), f"{locus.name}_{coordinate + 1}", alleles[0],
                        ",".join(alleles[1:]), ".", ".", info, "GT:PS:DP:AD:GQ:PL"]
             ad = AD[site_sa[site]:site_sa[site] + A].T.tolist()
@@ -1239,23 +1457,31 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
             columns.extend(format_field(gt[s], ph[s], ps[s], ad[s], gq[s], pl[s]) for s in range(S))
             vcf.write("\t".join(columns) + "\n")
         seen = Counter()
+        partial = Counter()             # haplotypes of the partially resolved genotypes (IUPAC / N sites)
         positions = ",".join(str(c + 1) for c in d.coordinates)
         for sample in range(S):
             hap_1, hap_2, n_missing, n_unphased = "", "", 0, 0
+            ambiguous_1, ambiguous_2 = "", ""
             for i, coordinate in enumerate(d.coordinates):
                 site = d.site_base + i
                 a, b = GT[site, sample]
                 if a < 0:
                     hap_1, hap_2, n_missing = hap_1 + "N", hap_2 + "N", n_missing + 1
-                elif not PH[site, sample]:
+                    ambiguous_1, ambiguous_2 = ambiguous_1 + "N", ambiguous_2 + "N"
+                elif not PH[site, sample] and a != b and len(d.coordinates) > 1:
                     hap_1, hap_2, n_unphased = hap_1 + "?", hap_2 + "?", n_unphased + 1
+                    code = iupac((d.alleles[coordinate][a], d.alleles[coordinate][b]))
+                    ambiguous_1, ambiguous_2 = ambiguous_1 + code, ambiguous_2 + code
                 else:
                     hap_1 += d.alleles[coordinate][a]
                     hap_2 += d.alleles[coordinate][b]
+                    ambiguous_1 += d.alleles[coordinate][a]
+                    ambiguous_2 += d.alleles[coordinate][b]
             if n_missing == len(d.coordinates):
                 status = "missing"
             elif n_missing or n_unphased:
                 status = "partial"
+                partial.update(sorted((ambiguous_1, ambiguous_2)))
             else:
                 status = "resolved"
                 hap_1, hap_2 = sorted((hap_1, hap_2))
@@ -1267,7 +1493,12 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
             locus.name, locus.length, d.n_real, d.n_synthetic, len(d.coordinates),
             max(len(a) for a in d.alleles.values()), len(seen),
             ",".join(f"{h}:{n}" for h, n in sorted(seen.items())) or ".", locus.conflicts))) + "\n")
-        fasta.write(f">{locus.name}\n{locus_sequence(locus, {c: a[0] for c, a in d.alleles.items()})}\n")
+        header = f"length_{locus.length}|n_sites_{len(d.coordinates)}|positions_{positions}"
+        fasta.write(f">{locus.name}|{header}\n"
+                    f"{locus_sequence(locus, {c: iupac(a) for c, a in d.alleles.items()})}\n")
+        reference = "".join(d.alleles[c][0] for c in d.coordinates)
+        write_alleles(alleles_fasta, locus.name, header, locus_sequence(locus, {}), d.coordinates,
+                      seen, reference, partial)
     log(f"[call] {len(data)} loci with several bubbles: {n_sites} sites, {n_multiallelic} with more than two alleles,"
         f" {sum(l.conflicts for l in loci)} placement conflicts, {n_conflicts} contradictory observations in facts")
     return len(data)
@@ -1277,16 +1508,20 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
 # call: isolated bubbles (vectorised)
 ###############################################################################
 
-def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names, locus_file, fasta):
+def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names, locus_file):
     """Loci made of one bubble: biallelic sites sharing the bubble's read counts.
 
     A lone multi-SNP bubble is phased by construction (its two paths): it is
-    written to the haplotype table like the loci with several bubbles.
+    written to the haplotype table like the loci with several bubbles.  A lone
+    single-SNP bubble has nothing to be phased with: '/' genotypes.
+    Returns {bubble id: (locus name, SNP positions, higher alleles, copies, lower alleles, copies)}
+    for write_single_fastas.
     """
     S = store.nsamples
     number = first_number
     n_sites = 0
     field_cache = {}
+    for_fasta = {}
     for i0 in range(0, len(indices), CHUNK_ROWS // 2):
         chunk = indices[i0:i0 + CHUNK_ROWS // 2]
         depths = np.stack([store.counts[2 * chunk], store.counts[2 * chunk + 1]], axis=2)   # [m, S, 2]
@@ -1297,7 +1532,9 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
         snps = store.snp_positions(chunk)
         ranks = store.ranks[chunk].tolist()
         ids = store.ids[chunk].tolist()
-        lens = store.lens[2 * chunk].tolist()
+        lengths = (store.left[2 * chunk] + store.lens[2 * chunk] + store.right[2 * chunk]).tolist()
+        offsets = store.left[2 * chunk].tolist()
+        metas = store.meta[chunk].tolist()
         for j, index in enumerate(chunk.tolist()):
             positions = snps[j].tolist()
             if not positions:
@@ -1306,22 +1543,26 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
             lower = store.path_str(2 * index + 1)
             name = f"locus_{number}"
             number += 1
-            rank = "." if math.isnan(ranks[j]) else ranks[j]
+            offset = offsets[j]                     # locus coordinate = extension + upper-case position
+            phased = len(positions) > 1
+            phase_set = offset + positions[0] + 1 if phased else 0
             gt_j = gt[j].tolist()
-            table = field_cache.setdefault(positions[0] + 1, {})
+            table = field_cache.setdefault(phase_set, {})
             fields = []
             for s, key in enumerate(keys[j].tolist()):
                 field = table.get(key)
                 if field is None:
-                    field = format_field(gt_j[s], True, positions[0] + 1, depths[j, s].tolist(),
+                    field = format_field(gt_j[s], phased, phase_set, depths[j, s].tolist(),
                                          int(gq[j, s]), pl[j, s].tolist())
                     if len(table) < 1_000_000:
                         table[key] = field
                 fields.append(field)
             sample_columns = "\t".join(fields)
+            info = info_field(None if math.isnan(ranks[j]) else ranks[j], metas[j], number - 1, 2, 1, 0, [ids[j]],
+                              len(positions), 0)
             for position in positions:
-                info = f"NB=1;NX=0;BUB={ids[j]};RK={rank};NSITES={len(positions)};PC=0"
-                vcf.write(f"{name}\t{position + 1}\t{name}_{position + 1}\t{higher[position]}\t{lower[position]}"
+                pos = offset + position + 1
+                vcf.write(f"{name}\t{pos}\t{name}_{pos}\t{higher[position]}\t{lower[position]}"
                           f"\t.\t.\t{info}\tGT:PS:DP:AD:GQ:PL\t{sample_columns}\n")
             n_sites += len(positions)
             hap_h = "".join(higher[p] for p in positions)
@@ -1330,8 +1571,8 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
             n_h = sum(g.count(0) for g in called)      # haplotype copies, as for the other loci
             n_l = sum(g.count(1) for g in called)
             haplotypes = [f"{h}:{n}" for h, n in ((hap_h, n_h), (hap_l, n_l)) if n]
+            pos_text = ",".join(str(offset + p + 1) for p in positions)
             if len(positions) > 1:
-                pos_text = ",".join(str(p + 1) for p in positions)
                 for s, (a, b) in enumerate(gt_j):
                     if a < 0:
                         row = ("missing", "N" * len(positions), "N" * len(positions), len(positions))
@@ -1339,11 +1580,36 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
                         row = ("resolved", (hap_h, hap_l)[a], (hap_h, hap_l)[b], 0)
                     hap_file.write("\t".join(map(str, (name, len(positions), pos_text, f"G{s + 1}",
                                                        names.get(s, "."), *row, 0))) + "\n")
-            locus_file.write("\t".join(map(str, (name, lens[j], 1, 0, len(positions), 2, len(haplotypes),
+            locus_file.write("\t".join(map(str, (name, lengths[j], 1, 0, len(positions), 2, len(haplotypes),
                                                  ",".join(sorted(haplotypes)) or ".", 0))) + "\n")
-            fasta.write(f">{name}\n{higher}\n")
+            for_fasta[ids[j]] = (name, pos_text, [offset + p for p in positions], hap_h, n_h, hap_l, n_l)
     log(f"[call] {number - first_number} isolated bubbles: {n_sites} sites")
-    return number - first_number
+    return for_fasta
+
+
+def write_single_fastas(fasta_file, for_fasta, fasta, alleles_fasta):
+    """Locus and alleles fasta records of the one-bubble loci, in the order of the fasta file
+    (the order of their locus numbers): the higher path with its extensions."""
+    with open(fasta_file, "rb") as handle:
+        header = None
+        for line in handle:
+            if line[:1] == b">":
+                header = line
+                continue
+            if header is not None and header.startswith(b">SNP_higher_path_"):
+                match = HEADER_RE.match(header)
+                record = for_fasta.get(int(match.group(3))) if match else None
+                if record is not None:
+                    name, pos_text, coordinates, hap_h, n_h, hap_l, n_l = record
+                    template = line.rstrip(b"\r\n").decode()
+                    locus_header = f"length_{len(template)}|n_sites_{len(coordinates)}|positions_{pos_text}"
+                    sequence = list(template)
+                    for coordinate, h, l in zip(coordinates, hap_h, hap_l):
+                        sequence[coordinate] = iupac((h, l))
+                    fasta.write(f">{name}|{locus_header}\n{''.join(sequence)}\n")
+                    copies = Counter({hap: n for hap, n in ((hap_h, n_h), (hap_l, n_l)) if n})
+                    write_alleles(alleles_fasta, name, locus_header, template, coordinates, copies, hap_h)
+            header = None
 
 
 ###############################################################################
@@ -1352,13 +1618,22 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
 
 VCF_HEADER = """##fileformat=VCFv4.2
 ##source=disco_haplotypes.py
+##INFO=<ID=Ty,Number=1,Type=String,Description="SNP, INS, DEL or .">
+##INFO=<ID=Rk,Number=1,Type=Float,Description="SNP rank (best rank among the kissnp2 bubbles describing this site)">
+##INFO=<ID=UL,Number=1,Type=Integer,Description="length of the unitig left (of the best ranked bubble)">
+##INFO=<ID=UR,Number=1,Type=Integer,Description="length of the unitig right (of the best ranked bubble)">
+##INFO=<ID=CL,Number=1,Type=Integer,Description="length of the contig left (of the best ranked bubble)">
+##INFO=<ID=CR,Number=1,Type=Integer,Description="length of the contig right (of the best ranked bubble)">
+##INFO=<ID=Genome,Number=1,Type=String,Description="Allele of the reference;for indel reference is . ">
+##INFO=<ID=Sd,Number=1,Type=Integer,Description="Reverse (-1) or Forward (1) Alignement">
+##INFO=<ID=Cluster,Number=1,Type=Integer,Description="Locus (cluster) number, as in CHROM">
+##INFO=<ID=ClSize,Number=1,Type=Integer,Description="Cluster size: number of kissnp2 bubble paths in the locus (2 per bubble)">
 ##INFO=<ID=NB,Number=1,Type=Integer,Description="Number of kissnp2 bubbles describing this site">
 ##INFO=<ID=NX,Number=1,Type=Integer,Description="Number of synthetic context bubbles describing this site">
 ##INFO=<ID=BUB,Number=.,Type=String,Description="Ids of the kissnp2 bubbles describing this site">
-##INFO=<ID=RK,Number=1,Type=Float,Description="Best DiscoSnp rank among these bubbles">
 ##INFO=<ID=NSITES,Number=1,Type=Integer,Description="Number of sites of the locus">
 ##INFO=<ID=PC,Number=1,Type=Integer,Description="Bubble placement conflicts in this locus (repeats, paralogs)">
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype; | = phased by the reads inside the locus">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype; | = phased with the other sites of the locus sharing its PS, / = not phased">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set (position of its first site)">
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sum of the allele depths">
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allele depths (lower bounds, see the documentation)">
@@ -1370,25 +1645,17 @@ VCF_HEADER = """##fileformat=VCFv4.2
 def call(args):
     parents = read_synthetic_map(args.map)
     synthetic_ids = np.array(sorted(parents), dtype=np.int64)
-    store = parse_store(args.coherent, with_counts=True)
+    store = parse_store(args.coherent, with_counts=True, max_flank=args.max_flank)
     if args.uncoherent and len(synthetic_ids) and os.path.exists(args.uncoherent):
         # a context existing for one allele only is 'uncoherent' for kissreads2,
         # its read counts are nevertheless valid
-        extra = parse_store(args.uncoherent, with_counts=True, only_ids=synthetic_ids)
+        extra = parse_store(args.uncoherent, with_counts=True, only_ids=synthetic_ids, max_flank=args.max_flank)
         if extra.n:
             keep = np.array([store.index_of(int(i)) < 0 for i in extra.ids], dtype=bool)
             if keep.any():
                 if extra.nsamples != store.nsamples:
                     sys.exit("ERROR: the coherent and uncoherent files have different numbers of read sets")
-                width = max(store.max_len, extra.max_len)
-                P = np.full((2 * (store.n + int(keep.sum())), width), PAD, dtype=np.uint8)
-                P[:2 * store.n, :store.max_len] = store.P
-                rows = np.repeat(2 * np.nonzero(keep)[0], 2) + np.tile([0, 1], int(keep.sum()))
-                P[2 * store.n:, :extra.max_len] = extra.P[rows]
-                store = BubbleStore(np.concatenate([store.ids, extra.ids[keep]]), P,
-                                    np.concatenate([store.lens, extra.lens[rows]]),
-                                    np.concatenate([store.counts, extra.counts[rows]]),
-                                    np.concatenate([store.ranks, extra.ranks[keep]]))
+                store = store.extended(extra, keep)
         del extra
     if not parents:
         log("[call] WARNING: no synthetic bubbles (no 'augment' step before kissreads2). Reads carrying\n"
@@ -1413,7 +1680,8 @@ def call(args):
             parent_edges[2].append(shift)
             parent_edges[3].append(1)
     edges = [np.array(e, dtype=np.int64) for e in parent_edges]
-    for source in (sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap),
+    for source in (sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap,
+                                  args.max_divergence, args.seed_sampling),
                    fact_edges(fact_files, store)):
         edges = [np.concatenate([a, b]) for a, b in zip(edges, source)]
     edges = tuple(edges)
@@ -1421,6 +1689,7 @@ def call(args):
     for bubble in materialised.values():
         if bubble.id in parents:
             bubble.parent = parents[bubble.id][0]
+    load_full_paths(args.coherent, {b.id: b for b in materialised.values() if b.parent is None})
     for number, locus in enumerate(loci, 1):
         locus.name = f"locus_{number}"
     in_locus = np.zeros(store.n, dtype=bool)
@@ -1438,12 +1707,13 @@ def call(args):
     with open(args.out + ".vcf", "w") as vcf, \
             open(args.out + ".tsv", "w") as hap_file, \
             open(args.out + "_loci.tsv", "w") as locus_file, \
-            open(args.out + "_loci.fa", "w") as fasta:
+            open(args.out + "_loci.fa", "w") as fasta, \
+            open(args.out + "_alleles.fa", "w") as alleles_fasta:
         vcf.write(VCF_HEADER)
         # contig lines: multi-bubble loci first, then isolated bubbles, in the order the records follow
         for number, locus in enumerate(loci, 1):
             vcf.write(f"##contig=<ID=locus_{number},length={locus.length}>\n")
-        single_lens = store.lens[2 * singles].tolist()
+        single_lens = (store.left[2 * singles] + store.lens[2 * singles] + store.right[2 * singles]).tolist()
         snp_counts = np.zeros(len(singles), dtype=np.int64)
         for i0 in range(0, len(singles), CHUNK_ROWS):
             snp_counts[i0:i0 + CHUNK_ROWS] = [len(p) for p in store.snp_positions(singles[i0:i0 + CHUNK_ROWS])]
@@ -1459,10 +1729,11 @@ def call(args):
         locus_file.write("locus\tlength\tn_bubbles\tn_synthetic\tn_sites\tmax_alleles\tn_haplotypes"
                          "\thaplotypes\tplacement_conflicts\n")
         n_multi = call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, locus_file, fasta,
-                                  site_files)
+                                  alleles_fasta, site_files)
         if len(singles):
             names = {sample_of_fact_file(f): read_set_name(f) for f in fact_files + site_files}
-            call_single_bubbles(store, singles, n_multi + 1, args, vcf, hap_file, names, locus_file, fasta)
+            for_fasta = call_single_bubbles(store, singles, n_multi + 1, args, vcf, hap_file, names, locus_file)
+            write_single_fastas(args.coherent, for_fasta, fasta, alleles_fasta)
 
 
 ###############################################################################
@@ -1490,6 +1761,14 @@ def add_placement_options(parser):
                         help="mismatches tolerated in the overlap of two paths (other contexts) [4]")
     parser.add_argument("--min_overlap", type=int, default=25,
                         help="minimal overlap between two paths [25]")
+    parser.add_argument("--max_flank", type=int, default=1000,
+                        help=f"lower-case extension (kissnp2 -t/-T) used on each side to place the bubbles"
+                             f" of a locus [1000, max {MAX_FLANK}]")
+    parser.add_argument("--max_divergence", type=float, default=0.02,
+                        help="extra mismatches tolerated per overlapping nucleotide (other alleles of the locus"
+                             " in the extensions) [0.02]")
+    parser.add_argument("--seed_sampling", type=int, default=8,
+                        help="one extension k-mer in N is used as seed [8]")
     parser.add_argument("--max_locus_bubbles", type=int, default=500,
                         help="components with more bubbles are repeats: their bubbles are kept isolated [500]")
 
@@ -1533,6 +1812,8 @@ def main():
     sub.set_defaults(function=strip)
 
     args = parser.parse_args()
+    if getattr(args, "max_flank", 0) > MAX_FLANK:
+        parser.error(f"--max_flank cannot exceed {MAX_FLANK}")
     args.function(args)
 
 

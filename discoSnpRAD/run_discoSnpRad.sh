@@ -182,7 +182,7 @@ function help {
     echo "      -H | --haplotypes"
     echo "           Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
     echo "           Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
-    echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv and _loci.fa. The usual outputs are unchanged."
+    echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
     echo ""
     echo "MISC."
     echo "      -u | --max_threads <int>"

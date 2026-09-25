@@ -90,6 +90,8 @@ function help {
        echo -e "\t-w: remove index files ( <.amb>, <.ann>, <.bwt>, <.pac>, <.sa>  )"
        echo -e "\t\t Optional"
        echo -e "\t-e: Map SNP predictions with their extensions on reference genome"
+       echo -e "\t\t In MODE 3, tells that the sam file was made from predictions with their extensions"
+       echo -e "\tThe VCF files are 1-based."
 }
 
 #---------------------------------------------------------------------------------------------------------------------------
@@ -234,11 +236,7 @@ if [ -z "$samfile" ];then
                             exit 1
                      fi
                      echo -e "... Creation of the vcf file : done ...==> $vcffile"
-
-                     echo -e " Transforming the created zero-based vcf onto a one-based vcf file"
-                     cmd="python3  $PATH_VCF_creator/zero2one.py -i $vcffile"
-                     echo $cmd
-                     $cmd
+                     # VCF_creator.py writes 1-based positions: no zero2one.py conversion
                      exit
               fi
        fi
@@ -340,11 +338,17 @@ else
        fi
 fi
 
-echo -e "python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile"
-python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile 
+# with -e the P_ positions of the headers were shifted by keep_extensions_disco_file.py: VCF_creator.py must
+# not add the extension length a second time to the position of the unmapped variants
+extensions_option=""
+if [ $map_with_extensions -eq 1 ]; then
+       extensions_option="-e"
+fi
+echo -e "python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option"
+python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option
 if [ $? -ne 0 ]
 then
-       echo "there was a problem with the VCF creation (command was \"python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile \""
+       echo "there was a problem with the VCF creation (command was \"python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option\""
        exit 1
 fi
 echo -e "... Creation of the vcf file: done ...==> $vcffile "
@@ -363,14 +367,7 @@ if [ $igv -eq 1 ] ; then
        echo -e "... Creation of the vcf file: done ...==> $vcffile"
        
        cat $tmpvcf > $nameVCFIGV\_for_IGV.vcf
-
-       echo -e " Transforming the created zero-based vcf (and for IGV vcf) onto one-based vcf files"
-       cmd="python3  $PATH_VCF_creator/zero2one.py -i $vcffile"
-       echo $cmd
-       $cmd
-       cmd="python3  $PATH_VCF_creator/zero2one.py -i ${nameVCFIGV}_for_IGV.vcf"
-       echo $cmd
-       $cmd
+       # VCF_creator.py writes 1-based positions (the VCF standard, also read by IGV): no zero2one.py conversion
 fi
 
 

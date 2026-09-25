@@ -153,7 +153,7 @@ function help {
     echo -e "\t -H | --haplotypes"
     echo -e "\t\t Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
     echo -e "\t\t Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
-    echo -e "\t\t then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv and _loci.fa. The usual outputs are unchanged."
+    echo -e "\t\t then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
 
     echo -e "\nREFERENCE GENOME AND/OR VCF CREATION OPTIONS"
     echo -e "\t -G | --reference_genome <file name>"
@@ -800,7 +800,7 @@ if [[ "$wraith" == "false" ]]; then
         echo -e " Ghost VCF file (1-based) is \""${kissprefix}_coherent.vcf"\""
     else
         echo -e " VCF file (1-based) is \""${kissprefix}_coherent.vcf"\""
-        echo -e " An IGV ready VCF file (sorted by position, only mapped variants, 0-based) is \""${kissprefix}_coherent_for_IGV.vcf"\""
+        echo -e " An IGV ready VCF file (sorted by position, only mapped variants, 1-based) is \""${kissprefix}_coherent_for_IGV.vcf"\""
     fi
     echo -e " Thanks for using discoSnp++ - http://colibread.inria.fr/discoSnp/ - Forum: http://www.biostars.org/t/discoSnp/"
     echo -e "################################################################################################################$reset"

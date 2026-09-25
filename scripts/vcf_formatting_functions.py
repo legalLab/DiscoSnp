@@ -69,7 +69,7 @@ def format_vcf(splitted_1, splitted_2, nb_samples, rank, sequence, cluster_id, c
     
     '''
         >SNP_higher_path_1487|P_1:30_A/G|low|nb_pol_1|left_unitig_length_
-        SNP_higher_path_1487    34    1487    A    G    .    .    Ty=SNP;Rk=0.00072476;UL=4;UR=60;CL=.;CR=.;Genome=.;Sd=.;Cluster=.;ClSize=.    GT:DP:PL:AD:HQ    0/1:53:194,32,613:37,16:71,71    0/1:83:296,44,955:58,25:71,71
+        SNP_higher_path_1487    35    1487    A    G    .    .    Ty=SNP;Rk=0.00072476;UL=4;UR=60;CL=.;CR=.;Genome=.;Sd=.;Cluster=.;ClSize=.    GT:DP:PL:AD:HQ    0/1:53:194,32,613:37,16:71,71    0/1:83:296,44,955:58,25:71,71
         '''
     
     ''' INDEL :
@@ -80,7 +80,8 @@ def format_vcf(splitted_1, splitted_2, nb_samples, rank, sequence, cluster_id, c
         aaggcagcggccagTCCAGGATGTCCAAGAATTCAACCAAT TCGGGACAGTCCAGATAGTCGTATAAC TCGAACAATTCTAAAGGATCGTTTAATTCAagcggc
         INDEL_higher_path_3205    41    3205    T    TTCGGGACAGTCCAGATAGTCGTATAAC    .    .    Ty=INS;Rk=0.019011;UL=14;UR=6;CL=.;CR=.;Genome=.;Sd=.;Cluster=.;ClSize=.    GT:DP:PL:AD:HQ    0/1:30:243,13,203:14,16:71,71    0/1:35:268,13,248:17,18:71,71
         
-        POS = UL + POS  : 1-based   (note: no longer left-normalized)
+        SNP:   POS = UL (or CL) + P_ + 1  : 1-based (P_ is 0-based)
+        INDEL: POS = UL (or CL) + P_      : 1-based anchor nucleotide (note: no longer left-normalized)
         '''
     
     FORMAT = "GT:DP:PL:AD:HQ"
@@ -137,10 +138,13 @@ def format_vcf(splitted_1, splitted_2, nb_samples, rank, sequence, cluster_id, c
     for pol in cigar:
         if ty == "SNP":
             POS, REF, ALT = re.findall("P_\d+:(\d+)_(\w)/(\w)",pol)[0]
-            POS = int(POS) + position_offset  # POS is 1-based
+            # the P_ position of a SNP is 0-based in the upper-case part (P_1:30 = 31st nucleotide): +1 for the 1-based VCF
+            POS = int(POS) + position_offset + 1
         else:  # INDEL
             POS, indel_size = re.findall("P_\d+:(\d+)_(\d+)",pol)[0]
-            POS = int(POS) + position_offset # 1-based
+            # the P_ position of an INDEL is the number of nucleotides before it in the upper-case part:
+            # it is the 1-based position of the anchor nucleotide (right-most representation)
+            POS = int(POS) + position_offset
             ALT = sequence[(POS-1):(POS+int(indel_size))]
             REF = ALT[0]
         ID = id
