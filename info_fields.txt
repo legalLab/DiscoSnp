@@ -1,0 +1,98 @@
+INFO fields of <prefix>_haplotypes.vcf
+=====================================
+
+Written by scripts/disco_haplotypes.py (option -H of run_discoSnp++.sh and
+discoSnpRAD/run_discoSnpRad.sh).
+
+One VCF record = one variable site of a locus. A locus is a set of kissnp2
+bubbles placed on a common coordinate system through their sequences (with
+their lower-case extensions, kissnp2 -t/-T) and through the reads mapping
+several of them (kissreads2 -phasing). CHROM is the locus (locus_N), POS is the
+1-based position of the site in the whole locus sequence written in
+<prefix>_haplotypes_loci.fa (lower-case extensions included), ID is
+locus_N_POS. A locus can be written in the reverse complement orientation of
+some of its bubbles: the alleles are then the complements of the alleles in
+their fasta headers.
+
+A site can be described by several bubbles (a site with 3 or 4 alleles is
+found by kissnp2 as several biallelic bubbles; overlapping bubbles share SNPs),
+so some fields summarise several bubbles.
+
+
+Fields shared with the discoSnpRad clustered VCF (<prefix>_clustered.vcf)
+-------------------------------------------------------------------------
+
+Ty       Type of variant. Always SNP (INDEL bubbles are not handled by
+         disco_haplotypes.py; they stay in the usual DiscoSnp VCF).
+
+Rk       DiscoSnp rank of the site: the best rank among the kissnp2 bubbles
+         describing it (rank_ field of the fasta headers).
+
+UL       Length of the left unitig of the best ranked bubble describing the
+         site (left_unitig_length_ of its header), '.' if absent.
+
+UR       Length of the right unitig of that bubble (right_unitig_length_).
+
+CL       Length of the left contig of that bubble (left_contig_length_),
+         '.' if kissnp2 was not run with -T.
+
+CR       Length of the right contig of that bubble (right_contig_length_).
+
+Genome   Allele of the reference genome. Always '.': the loci are not mapped
+         on a reference.
+
+Sd       Strand of the alignment on the reference genome (1 forward, -1
+         reverse). Always '.': the loci are not mapped on a reference.
+
+Cluster  Locus number, the N of CHROM locus_N.
+
+ClSize   Cluster size: number of kissnp2 bubble paths in the locus (2 per
+         bubble; synthetic bubbles are not counted).
+
+Note: in the clustered VCF, POS = CL (or UL) + the P_1: value of the header,
+which is a 0-based position. Its positions are therefore one lower than the
+1-based POS of <prefix>_haplotypes.vcf for the same SNP.
+
+
+Locus-level fields
+------------------
+
+NB       Number of kissnp2 bubbles describing this site. 1 for a biallelic
+         site found once; more for a site with 3 or 4 alleles or a SNP shared
+         by overlapping bubbles.
+
+NX       Number of synthetic bubbles describing this site. Before kissreads2,
+         'augment' writes every SNP of a locus again in the sequence contexts
+         of the other alleles of the SNPs close to it (single-SNP "synthetic"
+         bubbles): kissreads2 needs an exact seed, so without them the reads
+         carrying other alleles nearby would not be counted. Synthetic bubbles
+         are removed from the usual DiscoSnp outputs.
+
+BUB      Comma separated ids of the kissnp2 bubbles describing this site: the N
+         of SNP_higher_path_N / SNP_lower_path_N in the DiscoSnp fasta files,
+         and the ID column of the clustered VCF.
+
+NSITES   Number of variable sites of the locus (number of records with this
+         CHROM).
+
+PC       Placement conflicts of the locus: number of bubble pairs whose
+         relative placement (from the sequences or from the reads) disagrees
+         with the placement retained. 0 is expected; a positive value points
+         to repeats or paralogs merged in one locus.
+
+
+FORMAT, for reference
+---------------------
+
+GT       Genotype. Follows VCF 4.2: '|' = phased with every other site of the
+         locus carrying the same PS (all the sites of a phase set, the first
+         one included, are written with '|'); '/' = not phased: the only site
+         of its locus, or a heterozygous site no read links to the other
+         heterozygous sites of the locus.
+PS       Phase set: position of the first site of the phase set, '.' when
+         not phased.
+DP       Sum of the allele depths.
+AD       Allele depths (REF first). Lower bounds when the site is described
+         by several bubbles whose counts cannot simply be added.
+GQ       Genotype quality.
+PL       Phred-scaled genotype likelihoods.
