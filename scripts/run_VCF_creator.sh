@@ -18,15 +18,15 @@
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #*****************************************************************************
 
-# First check that python3 is installed and has version 3 or more:
-if ! hash python3; then
-    echo "python3 is not installed"
+# First check that python is installed and has version 3 or more:
+if ! hash python; then
+    echo "python is not installed"
     exit 1
 fi
 
-ver=$(python3 -V 2>&1 | sed 's/.* \([0-9]\).\([0-9]\).*/\1\2/')
+ver=$(python -V 2>&1 | sed 's/.* \([0-9]\).\([0-9]\).*/\1\2/')
 if [ "$ver" -lt "30" ]; then
-    echo "This script requires python3 3.0 or greater"
+    echo "This script requires python 3.0 or greater"
     exit 1
 fi
 
@@ -228,11 +228,11 @@ if [ -z "$samfile" ];then
                      echo -e "...And the file disco : option -p..."
                      exit 1
               else
-                     echo -e " run python3 $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile"
-                     python3 $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile #-n $n
+                     echo -e " run python $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile"
+                     python $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile #-n $n
                      if [ $? -ne 0 ]
                      then
-                            echo "there was a problem with the VCF creation (command was \"python3 $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile\""
+                            echo "there was a problem with the VCF creation (command was \"python $PATH_VCF_creator/VCF_creator.py -s $discoSNPs -o $vcffile\""
                             exit 1
                      fi
                      echo -e "... Creation of the vcf file : done ...==> $vcffile"
@@ -277,9 +277,9 @@ if [ -z "$samfile" ];then
                      discoSNPsbis=$(basename $discoSNPs .fa)"bis.fasta"
 
                      if [ $map_with_extensions -eq 1 ];then
-                            python3 $PATH_VCF_creator/keep_extensions_disco_file.py $discoSNPs $discoSNPsbis
+                            python $PATH_VCF_creator/keep_extensions_disco_file.py $discoSNPs $discoSNPsbis
                      else
-                            python3 $PATH_VCF_creator/remove_extensions_disco_file.py $discoSNPs $discoSNPsbis
+                            python $PATH_VCF_creator/remove_extensions_disco_file.py $discoSNPs $discoSNPsbis
                      fi
                      if [ -z "$discoSNPsbis" ];then
                             echo "...Error with the script remove_extensions_disco_file.py..."
@@ -344,11 +344,11 @@ extensions_option=""
 if [ $map_with_extensions -eq 1 ]; then
        extensions_option="-e"
 fi
-echo -e "python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option"
-python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option
+echo -e "python $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option"
+python $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option
 if [ $? -ne 0 ]
 then
-       echo "there was a problem with the VCF creation (command was \"python3 $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option\""
+       echo "there was a problem with the VCF creation (command was \"python $PATH_VCF_creator/VCF_creator.py -s $samfile -o $vcffile $extensions_option\""
        exit 1
 fi
 echo -e "... Creation of the vcf file: done ...==> $vcffile "
@@ -358,10 +358,10 @@ if [ $igv -eq 1 ] ; then
        $DIR/create_IGV_compatible_VCF.sh $vcffile
        nameVCFIGV=$( basename $vcffile .vcf )
        tmpvcf=$(mktemp tmp.vcf.XXXX) # Avoid overwriting if user already has file named tmp.vcf
-       python3 $PATH_VCF_creator/filterOnBestDP_multiple_variant_at_same_pos.py $nameVCFIGV\_for_IGV.vcf > $tmpvcf
+       python $PATH_VCF_creator/filterOnBestDP_multiple_variant_at_same_pos.py $nameVCFIGV\_for_IGV.vcf > $tmpvcf
        if [ $? -ne 0 ]
        then
-              echo "there was a problem with the IGV VCF creation (command was \"python3 $PATH_VCF_creator/filterOnBestDP_multiple_variant_at_same_pos.py $nameVCFIGV\_for_IGV.vcf > $tmpvcf\""
+              echo "there was a problem with the IGV VCF creation (command was \"python $PATH_VCF_creator/filterOnBestDP_multiple_variant_at_same_pos.py $nameVCFIGV\_for_IGV.vcf > $tmpvcf\""
               exit 1
        fi
        echo -e "... Creation of the vcf file: done ...==> $vcffile"

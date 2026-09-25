@@ -24,7 +24,7 @@ fi
 
 # 1000547h;-2286435h; -1330792h;1152525l; => 1
 # FORMAT PHASED ALLELE IDS INTO SIMPLER FORMAT FOR CONNECTED COMPONENT DETECTION
-#cmd="cat ${file} | tr -d \"-\" | sed '1d' | cut -d \"=\" -f 1 | python3 ${EDIR}/from_path_to_edges.py | cut -f 1,2 | tr -d \"l\" | tr -d \"h\" | sort -u "
+#cmd="cat ${file} | tr -d \"-\" | sed '1d' | cut -d \"=\" -f 1 | python ${EDIR}/from_path_to_edges.py | cut -f 1,2 | tr -d \"l\" | tr -d \"h\" | sort -u "
 # 1/ suppress the '-' sign occurrences 
 # 2/ suppres the first line 
 # 3/ remove what exists after => (included) 
@@ -41,7 +41,7 @@ fi
 
 ### Same command keeping only edges seen at leas edge_coverage_threshold times
 
-cmd="cat ${file} | tr -d \"-\" | sed '1d' | cut -d \"=\" -f 1 | python3 ${EDIR}/from_path_to_edges.py | cut -f 1,2 | tr -d \"l\" | tr -d \"h\" | sort | uniq -c | awk '\$1>=${edge_coverage_threshold} {print \$2\" \"\$3}'"
+cmd="cat ${file} | tr -d \"-\" | sed '1d' | cut -d \"=\" -f 1 | python ${EDIR}/from_path_to_edges.py | cut -f 1,2 | tr -d \"l\" | tr -d \"h\" | sort | uniq -c | awk '\$1>=${edge_coverage_threshold} {print \$2\" \"\$3}'"
 ###
 echo $cmd "> edge_${filename}"
 eval $cmd "> edge_${filename}"

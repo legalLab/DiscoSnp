@@ -50,7 +50,7 @@ echo ""
 
 # Prefiltering: removing non perfectly overlapping facts
 echo "${green}           ### Removing non perfectly overlapping facts"
-cmd="python3 ${EDIR}/K3000_filter_badly_overlapping_variants.py ${disco_cofa_file} ${disco_uncofa_file} ${phased_allele_file}"
+cmd="python ${EDIR}/K3000_filter_badly_overlapping_variants.py ${disco_cofa_file} ${disco_uncofa_file} ${phased_allele_file}"
 echo "           "$cmd "> filtered_${phased_allele_file}${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > filtered_${phased_allele_file}
@@ -65,7 +65,7 @@ fi
 
 # Determining working zones: 
 echo "${green}           ### Determining working zones"
-cmd="python3 ${EDIR}/K3000_working_zone_no_redundant_edges.py filtered_${phased_allele_file}"
+cmd="python ${EDIR}/K3000_working_zone_no_redundant_edges.py filtered_${phased_allele_file}"
 echo "           "$cmd " > wz_filtered_${phased_allele_file}${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > wz_filtered_${phased_allele_file}
@@ -79,7 +79,7 @@ fi
 
 # Creating a file where simple paths are compacted
 echo "${green}           ### Creating a file where simple paths are compacted"
-cmd="python3 ${EDIR}/K3000.py wz_filtered_${phased_allele_file}"
+cmd="python ${EDIR}/K3000.py wz_filtered_${phased_allele_file}"
 echo "           "$cmd "> compacted_facts_int_${read_set_id}.txt${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > compacted_facts_int_${read_set_id}.txt
@@ -95,7 +95,7 @@ fi
 
 # Creating a file with sequences of the compacted paths and removing uncoherent compactions
 echo "${green}           ### Creating a fasta file from compacted facts"
-cmd="python3 ${EDIR}/K3000_paths_to_fa.py ${disco_cofa_file} ${disco_uncofa_file} compacted_facts_int_${read_set_id}.txt" 
+cmd="python ${EDIR}/K3000_paths_to_fa.py ${disco_cofa_file} ${disco_uncofa_file} compacted_facts_int_${read_set_id}.txt" 
 echo "           "$cmd "> compacted_facts_${read_set_id}.fa${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > compacted_facts_${read_set_id}.fa
@@ -122,8 +122,8 @@ fi
 
 ### Creating a GFA graph
 echo "${green}           ### Creating a GFA graph"
-# python3 ${EDIR}/K3000_facts_to_gfa.py compacted_facts_int.txt > compacted_facts.gfa 
-cmd="python3 ${EDIR}/K3000_facts_to_gfa.py compacted_facts_int_${read_set_id}.txt"
+# python ${EDIR}/K3000_facts_to_gfa.py compacted_facts_int.txt > compacted_facts.gfa 
+cmd="python ${EDIR}/K3000_facts_to_gfa.py compacted_facts_int_${read_set_id}.txt"
 echo "           "$cmd "> compacted_facts_${read_set_id}.gfa${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > compacted_facts_${read_set_id}.gfa
@@ -138,7 +138,7 @@ fi
 
 # Adding paired edges and counting of compacted facts
 echo "${green}           ### Adding paired edges and counting of compacted facts"
-cmd="python3 ${EDIR}/K3000_enhance_gfa.py compacted_facts_${read_set_id}.gfa wz_filtered_${phased_allele_file} ${disco_cofa_file} ${disco_uncofa_file} ${read_set_id}"
+cmd="python ${EDIR}/K3000_enhance_gfa.py compacted_facts_${read_set_id}.gfa wz_filtered_${phased_allele_file} ${disco_cofa_file} ${disco_uncofa_file} ${read_set_id}"
 echo "           "$cmd" > graph_${read_set_id}.gfa${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > graph_${read_set_id}.gfa
@@ -152,8 +152,8 @@ fi
 
 # Detecting snp succesion
 echo "${green}           ### Detecting snp succession"
-# python3 ${EDIR}/find_unitig_connected_pairs_of_facts.py graph.gfa ${disco_cofa_file} > graph_plus.gfa
-cmd="python3 ${EDIR}/K3000_find_unitig_connected_pairs_of_facts.py graph_${read_set_id}.gfa ${disco_cofa_file} ${disco_uncofa_file}"
+# python ${EDIR}/find_unitig_connected_pairs_of_facts.py graph.gfa ${disco_cofa_file} > graph_plus.gfa
+cmd="python ${EDIR}/K3000_find_unitig_connected_pairs_of_facts.py graph_${read_set_id}.gfa ${disco_cofa_file} ${disco_uncofa_file}"
 echo "           "$cmd" > graph_plus_${read_set_id}.gfa${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > graph_plus_${read_set_id}.gfa
@@ -166,8 +166,8 @@ fi
 
 
 echo "${green}           ### Create final graph with sequence content"
-# python3 ${EDIR}/K3000_node_ids_to_node_sequences.py graph_plus.gfa compacted_facts.fa > graph_final.gfa
-cmd="python3 ${EDIR}/K3000_node_ids_to_node_sequences.py graph_plus_${read_set_id}.gfa compacted_facts_${read_set_id}.fa"
+# python ${EDIR}/K3000_node_ids_to_node_sequences.py graph_plus.gfa compacted_facts.fa > graph_final.gfa
+cmd="python ${EDIR}/K3000_node_ids_to_node_sequences.py graph_plus_${read_set_id}.gfa compacted_facts_${read_set_id}.fa"
 echo "           "$cmd" > graph_final_${read_set_id}.gfa${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd > graph_final_${read_set_id}.gfa
@@ -179,7 +179,7 @@ then
 fi
 
 echo "${green}           ### Create stats (requires mathplotlib)"
-cmd="python3 ${EDIR}/stats.py graph_plus_${read_set_id}.gfa graph_final_${read_set_id}.gfa ${read_set_id}"
+cmd="python ${EDIR}/stats.py graph_plus_${read_set_id}.gfa graph_final_${read_set_id}.gfa ${read_set_id}"
 echo "           "$cmd"${cyan}"
 if [[ "$wraith" == "false" ]]; then
     eval $cmd
