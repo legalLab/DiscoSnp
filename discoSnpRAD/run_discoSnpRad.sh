@@ -492,7 +492,7 @@ if [ $trim_sites -eq 1 ]; then
     echo "     ############################################################$reset"
     trimmed_dir=${prefix}_trimmed_reads
     trimmed_fof=${trimmed_dir}/$(basename ${read_sets})
-    trimCmd="python3 $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads}"
+    trimCmd="python $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads}"
     echo $green$trimCmd$cyan$reset
     if [[ "$wraith" == "false" ]]; then
         $trimCmd
