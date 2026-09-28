@@ -105,6 +105,7 @@ haplotypes=0
 trim_sites=1          # trim the restriction site remnants at the 5' end of the reads (--no_trim to disable)
 trim_r1="auto"        # nucleotides trimmed from the reads 1, or auto-detected
 trim_r2="auto"        # nucleotides trimmed from the reads 2, or auto-detected
+keep_reads_without_site=""   # by default the reads (pairs) not starting with the site are removed
 nb_threads=0
 #######################################################################
 #################### END HEADER                 #######################
@@ -190,11 +191,17 @@ function help {
     echo ""
     echo "RESTRICTION SITES (preprocessing_scripts/trim_restriction_sites.py)"
     echo "      By default the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI)"
-    echo "      is detected in each read file (first 50000 reads: leading positions where one nucleotide makes >= 90 % of"
-    echo "      the reads, N ignored) and trimmed. Files without such a conserved 5' end (e.g. the sheared reads 2 of a"
-    echo "      single digest RAD) are not trimmed. Trimmed files and a report are written in <prefix>_trimmed_reads/."
+    echo "      is detected in each read file (first 50000 reads: leading positions sharing the frequency of the first one,"
+    echo "      itself >= 50 %, N ignored; reads without the site such as adapter dimers or contaminants are tolerated)"
+    echo "      and trimmed. A file where it is not found gets the site of the other files of the same read if >= 10 % of"
+    echo "      its reads start with it. Files without such a conserved 5' end (e.g. the sheared reads 2 of a single"
+    echo "      digest RAD) are not trimmed. Trimmed files and a report are written in <prefix>_trimmed_reads/."
+    echo "      By default the reads that do not start with the site of their file (adapter dimers, contaminants...) are"
+    echo "      removed; the files of a sample file of files (R1 and R2) are filtered together, as pairs."
     echo "      --no_trim"
-    echo "           Do not trim the reads."
+    echo "           Do not trim the reads (and do not remove the reads without the site)."
+    echo "      --keep_reads_without_site"
+    echo "           Trim the sites but keep the reads (pairs) that do not start with the site."
     echo "      --trim_r1 <int>"
     echo "           Trim this number of nucleotides from the 5' end of the reads 1 instead of detecting it."
     echo "      --trim_r2 <int>"
@@ -227,6 +234,10 @@ while :; do
     case $1 in
     --no_trim)
         trim_sites=0
+        ;;
+
+    --keep_reads_without_site)
+        keep_reads_without_site="--keep_reads_without_site"
         ;;
 
     --trim_r1|--trim_r2)
@@ -492,7 +503,7 @@ if [ $trim_sites -eq 1 ]; then
     echo "     ############################################################$reset"
     trimmed_dir=${prefix}_trimmed_reads
     trimmed_fof=${trimmed_dir}/$(basename ${read_sets})
-    trimCmd="python $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads}"
+    trimCmd="python $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads} ${keep_reads_without_site}"
     echo $green$trimCmd$cyan$reset
     if [[ "$wraith" == "false" ]]; then
         $trimCmd

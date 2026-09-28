@@ -42,8 +42,12 @@ Gauthier, J., Mouden, C.,  Suchan, T., Alvarez, N., Arrigo, N., Riou, C., Lemait
 By default, the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI) is
 detected in each read file and trimmed before the graph is built. Files without a conserved 5' end (e.g. the
 sheared reads 2 of a single digest RAD) are not trimmed.
+By default, the reads that do not start with the site of their file (adapter dimers, contaminants, organelle
+reads...) are removed; the files of a sample file of files (R1 and R2) are filtered together, as pairs.
 --no_trim
-    Do not trim the reads.
+    Do not trim the reads (and do not remove the reads without the site).
+--keep_reads_without_site
+    Trim the sites but keep the reads (pairs) that do not start with the site.
 --trim_r1 <int>
     Trim this number of nucleotides from the 5' end of the reads 1 instead of detecting it.
 --trim_r2 <int>
@@ -72,7 +76,7 @@ Additionnally, several other files are output that can be usefull :
 * `myDiscoSnpRADresult_[parameter_values]_raw.fa`: the raw set of variants in fasta format, prior to any filtering and clustering steps.
 * `myDiscoSnpRADresult_[graph_parameter_values].h5`: the de Bruijn graph in h5 format (reusable with any GATB tool)
 * `myDiscoSnpRADresult_read_files_correspondance.txt`: the correspondence between read file names and IDs given as genotypes in the vcf
-* `myDiscoSnpRADresult_trimmed_reads/`: the reads without their restriction site (unless `--no_trim`), the file of files used by the pipeline and `trimming_report.tsv`, giving for each read file the trimmed length and nucleotides
+* `myDiscoSnpRADresult_trimmed_reads/`: the reads without their restriction site (unless `--no_trim`), the file of files used by the pipeline and `trimming_report.tsv`, giving for each read file the trimmed length and nucleotides and the number of reads (pairs) removed because they lack the site
 * the standard output reminds all filtering steps applied and the name of the output .vcf file
 
 #### VCF format
