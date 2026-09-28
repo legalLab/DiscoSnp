@@ -6,7 +6,7 @@
 * [2. No reference genome - Using only reads 1 from pairs - With clustering](#2)
 * [3. Using a reference genome - Using only reads 1 from pairs - With clustering](#3)
 * [4. Using forward and reverse reads.](#4)
-* [5. Trimming the restriction sites](#5)
+* [5. Restriction sites](#5)
 * [6. Post-processing](#6)
 
 - - - -
@@ -31,7 +31,7 @@ To date, DiscoSnp-RAD is not able to consider multiplexed data. Hence, input fil
 
 **Note about restriction sites**
 
-By default, DiscoSnp-RAD detects and trims the restriction site remnant at the 5' end of the reads before calling variants, and removes the reads (pairs) that do not start with the site (see [section 5](#5)). Use `--no_trim` to keep the reads as they are.
+By default, DiscoSnp-RAD detects the restriction site remnant at the 5' end of the reads, removes the reads (pairs) that do not start with the site, and removes the false variants inside the sites (see [section 5](#5)). Use `--no_site_processing` to keep the reads as they are.
 
 - - - -
 
@@ -208,67 +208,81 @@ done
 ls my_fof_set*.txt > my_fof.txt
 ```
 
-In this second case, the first file of each sample fof is considered as the reads 1 and the second one as the reads 2 (this matters when giving the trimmed lengths with `--trim_r1` / `--trim_r2`, see [section 5](#5)).
+In this second case, the first file of each sample fof is considered as the reads 1 and the second one as the reads 2 (this matters when giving the site lengths with `--trim_r1` / `--trim_r2`, see [section 5](#5)).
 
-## 5. <a name="5">Trimming the restriction sites</a>
+## 5. <a name="5">Restriction sites</a>
 
-In RAD and ddRAD data, the reads that start at a restriction site all begin with the same few nucleotides, the remnant of the site (e.g. `TGCAG` for PstI, `CGG` for MspI, `AATTC` for EcoRI, `TGCAGG` for SbfI), whatever the locus. These nucleotides are not polymorphic: DiscoSnp-RAD removes them before building the graph. This is done by default, with any of the usages above.
+In RAD and ddRAD data, the reads that start at a restriction site all begin with the same few nucleotides, the remnant of the site (e.g. `TGCAG` for PstI, `CGG` for MspI, `AATTC` for EcoRI, `TGCAGG` for SbfI), whatever the locus. By default, with any of the usages above, DiscoSnp-RAD:
 
-**Automatic detection (default)**
+1. detects the site of every read file,
+2. removes the reads (pairs) that do not start with the site of their file: adapter dimers, contaminants, repeated artefacts, organelle reads... which are not RAD loci,
+3. keeps the site in the reads, and removes from the bubbles the false variants lying inside the sites (a genuine mutation of the site would prevent the cut: a "variant" there is a sequencing error or an artefact).
+
+The reads are not trimmed by default: on a ddRAD data set, trimming the sites from the reads made kissnp2 miss 46 % of the SNPs 6 to 9 nt after the site and 15 % of those 10 to 30 nt after it. The false variants inside the sites are instead removed from the bubbles after their detection, before the reads are mapped on them, so that the read counts, the genotypes, the clustering and every output are computed without them.
+
+**Detection of the sites**
 
 ```bash
 /my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt
 ```
 
-For each read file, the first 50,000 reads (reads from thousands of loci) are profiled from their 5' end. Libraries also hold reads without the site (adapter dimers, contaminants, repeated artefacts, organelle reads: commonly 5 to 20 %), so the site is recognised by its profile rather than by asking every read to carry it:
+For each read file, the first 50,000 reads (reads from thousands of loci) are profiled from their 5' end. Libraries also hold reads without the site (commonly 1 to 10 %, sometimes 20 % or more), so the site is recognised by its profile rather than by asking every read to carry it:
 
 * the first position starts a site when one nucleotide makes at least 50 % of the reads. This frequency is the level of the site (about the fraction of the reads carrying it, e.g. 0.99, or 0.83 in a library with 20 % of reads without the site).
 * the next positions belong to the site as long as their major nucleotide stays at 90 % of this level (two nucleotides together are accepted for degenerate sites such as ApeKI `G^CWGC`).
-* behind the site the reads enter the loci and the frequency drops (e.g. 0.82 → 0.41, or 1.00 → 0.84 in a low diversity library): the site, and the trimmed length, end there.
-* all the files of a run share their enzymes: in a file where no site is found, the site found in most files of the same read (reads 1, or reads 2) is trimmed if at least 10 % of its reads start with it (by chance, a 3 to 5 nt site starts 0.1 to 1.6 % of the reads).
+* behind the site the reads enter the loci and the frequency drops (e.g. 0.82 → 0.41, or 1.00 → 0.84 in a low diversity library): the site ends there.
+* all the files of a run share their enzymes: in a file where no site is found, the site found in most files of the same read (reads 1, or reads 2) is used if at least 10 % of its reads start with it (by chance, a 3 to 5 nt site starts 0.1 to 1.6 % of the reads).
 
 Profiling more reads would not change the result: these fractions are stable along a file. Then:
 
 * `N` are ignored, and a position that is `N` in most reads (a failed sequencing cycle, frequently the second one) does not stop the detection.
-* the detection is done per file: in single digest RAD data, the reads 2 start at a random (sheared) position, nothing is conserved and they are not trimmed. In ddRAD data, the reads 1 and 2 get the remnant of their own enzyme.
-* an inline barcode still present after demultiplexing is constant within a sample: it is trimmed with the site.
-* files of the same read (reads 1 or reads 2) trimmed to different lengths are reported with a warning.
-* variable length spacers before the site ("heterogeneity spacers", staggered adapters) move the site from read to read: nothing can be detected, the file is not trimmed and a warning is printed. Remove the spacers first (e.g. with your demultiplexing tool), or give the lengths as below.
+* the detection is done per file: in single digest RAD data, the reads 2 start at a random (sheared) position, nothing is conserved and they have no site. In ddRAD data, the reads 1 and 2 get the remnant of their own enzyme.
+* an inline barcode still present after demultiplexing is constant within a sample: it is included in the site.
+* files of the same read (reads 1 or reads 2) with sites of different lengths are reported with a warning.
+* variable length spacers before the site ("heterogeneity spacers", staggered adapters) move the site from read to read: nothing can be detected and a warning is printed. Remove the spacers first (e.g. with your demultiplexing tool), or give the lengths as below.
 
-**Given lengths**
+**Given site lengths**
 
 ```bash
-# ddRAD PstI - MspI: remove TGCAG from the reads 1 and CGG from the reads 2
+# ddRAD PstI - MspI: TGCAG at the start of the reads 1, CGG at the start of the reads 2
 /my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --trim_r1 5 --trim_r2 3
-# single digest RAD SbfI: remove TGCAGG from the reads 1 only
+# single digest RAD SbfI: TGCAGG at the start of the reads 1 only
 /my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --trim_r1 6 --trim_r2 0
 ```
 
-A length that is not given is still detected automatically. The reads 2 are the second file of a sample fof ([section 4](#4)), or the files named `*_R2*`, `*_2.*`, `*.2.*`; any other file is considered as reads 1.
+A length that is not given is still detected automatically. The reads 2 are the second file of a sample fof ([section 4](#4)), or the files named `*_R2*`, `*_2.*`, `*.2.*`; any other file is considered as reads 1. The site is then the part of the given length where a site is detected (a file without a detected site is not filtered).
 
 **Reads without the site (removed by default)**
 
-A library also holds reads that do not start with the site: adapter dimers, contaminants, repeated artefacts, organelle reads... (commonly 1 to 10 % of the reads, sometimes 20 % or more). They are not RAD loci, and they are removed by default: a read is removed when its first nucleotides do not match the site of its file (`N` in the read and degenerate positions of the site, e.g. `W` for ApeKI, match). The files of a sample fof (R1 and R2, [section 4](#4)) are filtered together: a pair is removed when one of its reads lacks the site of its file, so that the files stay paired. In single digest RAD data, the reads 2 have no site and are not checked, but they lose the pairs of the removed reads 1. With `--trim_r1` / `--trim_r2`, the site checked is the part of the given length where a site is detected (a file without a detected site is not filtered).
-
-The number of reads (pairs) removed is printed for each sample and given in `trimming_report.tsv`; a warning is printed when more than half of them are removed. To trim the sites but keep all the reads:
+A read is removed when its first nucleotides do not match the site of its file (`N` in the read and degenerate positions of the site, e.g. `W` for ApeKI, match). The files of a sample fof (R1 and R2, [section 4](#4)) are filtered together: a pair is removed when one of its reads lacks the site of its file, so that the files stay paired. In single digest RAD data, the reads 2 have no site and are not checked, but they lose the pairs of the removed reads 1. The number of reads (pairs) removed is printed for each sample and given in `trimming_report.tsv`; a warning is printed when more than half of them are removed. To keep all the reads:
 
 ```bash
 /my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --keep_reads_without_site
 ```
 
-**No trimming**
+**Variants inside the sites (removed by default)**
+
+A SNP is inside a site when one of the two paths of its bubble starts with a site (or ends with its reverse complement) and the SNP is within these nucleotides. A bubble whose SNPs are all inside a site is removed; in a bubble with other SNPs, only the SNPs inside a site are removed (the bubble keeps its other SNPs). The number of SNPs and bubbles removed is printed (`[site variants]`).
+
+**Trimming the sites from the reads (optional)**
 
 ```bash
-/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --no_trim
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --trim_sites
 ```
 
-Neither trimming nor removal of the reads without the site is then done.
+The sites are removed from the reads before building the graph (the loci are then shorter by the length of the sites, and the variant positions shifted). The variants inside the sites cannot be found anymore, but SNPs close to the sites are missed (see above).
+
+**No site processing**
+
+```bash
+/my/discoSnp/path/discoSnpRAD/run_discoSnpRad.sh -r my_fof.txt --no_site_processing
+```
+
+The reads are used as they are: no read is removed, no site is trimmed and the variants inside the sites are kept, as in DiscoSnp-RAD versions without site processing (`--no_trim` is kept as an alias of this option).
 
 **Outputs**
 
-The trimmed files are written in `discoRad_trimmed_reads/` (`<prefix>_trimmed_reads/`), with the fof actually used by the pipeline and `trimming_report.tsv`. For each file, this report gives the trimmed length, the trimmed nucleotides (e.g. `TGCAG`, or `TNCAG` with a failed second cycle) and the profile of the first positions: check that they match your enzymes. A file that is neither trimmed nor filtered is not copied. The order of the reads is kept and the reads 1 and 2 of a pair are always kept or removed together (a read shorter than the trimmed length is replaced by a single `N`).
-
-Note that the loci are shorter by the length of the remnants: the variant positions differ from the ones of an untrimmed run (`--no_trim`, or DiscoSnp-RAD versions without trimming).
+The filtered (or, with `--trim_sites`, trimmed) read files are written in `discoRad_filtered_reads/` (`<prefix>_filtered_reads/`), with the fof actually used by the pipeline, `sites.txt` (the sites found) and `trimming_report.tsv`. For each read file, this report gives the site length, the site (e.g. `TGCAG`, or `TNCAG` with a failed second cycle), the profile of the first positions (check that they match your enzymes) and the number of reads (pairs) removed. A file that is neither filtered nor trimmed is not copied. The order of the reads is kept and the reads 1 and 2 of a pair are always kept or removed together.
 
 ## 6. <a name="6">Post-processing</a>
 

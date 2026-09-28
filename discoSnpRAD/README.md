@@ -36,22 +36,24 @@ Gauthier, J., Mouden, C.,  Suchan, T., Alvarez, N., Arrigo, N., Riou, C., Lemait
     -Note3: with this option, discoSnpRad outputs a vcf file containing the variants clustered by locus.
 ```
 
-**Restriction site trimming** (RAD-specific option, on by default):
+**Restriction sites** (RAD-specific options, on by default):
 
 ```
 By default, the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI) is
-detected in each read file and trimmed before the graph is built. Files without a conserved 5' end (e.g. the
-sheared reads 2 of a single digest RAD) are not trimmed.
-By default, the reads that do not start with the site of their file (adapter dimers, contaminants, organelle
-reads...) are removed; the files of a sample file of files (R1 and R2) are filtered together, as pairs.
---no_trim
-    Do not trim the reads (and do not remove the reads without the site).
+detected in each read file, the reads (pairs) that do not start with the site of their file (adapter dimers,
+contaminants, organelle reads...) are removed, the reads keep their site, and the false variants inside the
+sites are removed from the bubbles. Files without a conserved 5' end (e.g. the sheared reads 2 of a single
+digest RAD) have no site.
+--trim_sites
+    Also remove the sites from the reads (not by default: SNPs close to the sites are then missed).
 --keep_reads_without_site
-    Trim the sites but keep the reads (pairs) that do not start with the site.
+    Keep the reads (pairs) that do not start with the site.
+--no_site_processing (or --no_trim)
+    No site detection, no read removal, no trimming, no removal of the variants inside the sites.
 --trim_r1 <int>
-    Trim this number of nucleotides from the 5' end of the reads 1 instead of detecting it.
+    Length of the site of the reads 1, instead of detecting it.
 --trim_r2 <int>
-    Trim this number of nucleotides from the 5' end of the reads 2 instead of detecting it.
+    Length of the site of the reads 2, instead of detecting it.
 ```
 
 See the [cookbook](./COOKBOOK.md#5) for the detection method and its limits (e.g. variable length spacers).
@@ -76,7 +78,7 @@ Additionnally, several other files are output that can be usefull :
 * `myDiscoSnpRADresult_[parameter_values]_raw.fa`: the raw set of variants in fasta format, prior to any filtering and clustering steps.
 * `myDiscoSnpRADresult_[graph_parameter_values].h5`: the de Bruijn graph in h5 format (reusable with any GATB tool)
 * `myDiscoSnpRADresult_read_files_correspondance.txt`: the correspondence between read file names and IDs given as genotypes in the vcf
-* `myDiscoSnpRADresult_trimmed_reads/`: the reads without their restriction site (unless `--no_trim`), the file of files used by the pipeline and `trimming_report.tsv`, giving for each read file the trimmed length and nucleotides and the number of reads (pairs) removed because they lack the site
+* `myDiscoSnpRADresult_filtered_reads/`: the reads starting with their restriction site (unless `--no_site_processing`; without the site with `--trim_sites`), the file of files used by the pipeline, `sites.txt` (the sites found) and `trimming_report.tsv`, giving for each read file its site and the number of reads (pairs) removed because they lack it
 * the standard output reminds all filtering steps applied and the name of the output .vcf file
 
 #### VCF format
@@ -104,7 +106,7 @@ This [cookbook](./COOKBOOK.md) presents classical usages.
 ## Content of this directory
 
 Additionnally to the main script of discoSnpRAD, this directory contains three sub-directories :   
-* [preprocessing_scripts](preprocessing_scripts/) : `trim_restriction_sites.py`, used by the main script to detect and trim the restriction sites of the reads (it can also be run alone, see `trim_restriction_sites.py -h`).
+* [preprocessing_scripts](preprocessing_scripts/) : `trim_restriction_sites.py`, used by the main script to detect the restriction sites of the reads, remove the reads without site and optionally trim the sites, and `remove_site_variants.py`, which removes the false variants inside the sites from the bubbles (both can also be run alone, see `-h`).
 * [clustering_scripts](clustering_scripts/) : it contains the scripts used by the main script of discoSnpRAD for clustering and formatting the variants.
 * [post-processing_scripts](post-processing_scripts/) : it contains several scripts that can be usefull to post-process the results of discoSnpRAD, ie. filtering results according to various criteria, changing format, preparing data for Structure, etc.
 

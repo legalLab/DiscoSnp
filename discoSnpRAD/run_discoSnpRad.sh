@@ -102,9 +102,10 @@ wraith="false"
 max_truncated_path_length_difference=0
 option_phase_variants=""
 haplotypes=0
-trim_sites=1          # trim the restriction site remnants at the 5' end of the reads (--no_trim to disable)
-trim_r1="auto"        # nucleotides trimmed from the reads 1, or auto-detected
-trim_r2="auto"        # nucleotides trimmed from the reads 2, or auto-detected
+site_processing=1     # detect the restriction sites, remove the reads without site and the variants inside the sites
+trim_reads=""         # --trim_sites: also remove the sites from the reads (not by default)
+trim_r1="auto"        # length of the site of the reads 1, or auto-detected
+trim_r2="auto"        # length of the site of the reads 2, or auto-detected
 keep_reads_without_site=""   # by default the reads (pairs) not starting with the site are removed
 nb_threads=0
 #######################################################################
@@ -189,23 +190,28 @@ function help {
     echo "           Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
     echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
     echo ""
-    echo "RESTRICTION SITES (preprocessing_scripts/trim_restriction_sites.py)"
+    echo "RESTRICTION SITES (preprocessing_scripts/trim_restriction_sites.py and remove_site_variants.py)"
     echo "      By default the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI)"
     echo "      is detected in each read file (first 50000 reads: leading positions sharing the frequency of the first one,"
-    echo "      itself >= 50 %, N ignored; reads without the site such as adapter dimers or contaminants are tolerated)"
-    echo "      and trimmed. A file where it is not found gets the site of the other files of the same read if >= 10 % of"
-    echo "      its reads start with it. Files without such a conserved 5' end (e.g. the sheared reads 2 of a single"
-    echo "      digest RAD) are not trimmed. Trimmed files and a report are written in <prefix>_trimmed_reads/."
-    echo "      By default the reads that do not start with the site of their file (adapter dimers, contaminants...) are"
-    echo "      removed; the files of a sample file of files (R1 and R2) are filtered together, as pairs."
-    echo "      --no_trim"
-    echo "           Do not trim the reads (and do not remove the reads without the site)."
+    echo "      itself >= 50 %, N ignored; reads without the site such as adapter dimers or contaminants are tolerated)."
+    echo "      A file where it is not found gets the site of the other files of the same read if >= 10 % of its reads"
+    echo "      start with it. Files without such a conserved 5' end (e.g. the sheared reads 2 of a single digest RAD) have"
+    echo "      no site. Then, by default:"
+    echo "        - the reads that do not start with the site of their file (adapter dimers, contaminants...) are removed;"
+    echo "          the files of a sample file of files (R1 and R2) are filtered together, as pairs,"
+    echo "        - the reads keep their site (trimming them makes kissnp2 miss SNPs close to the sites),"
+    echo "        - the false variants inside the sites are removed from the bubbles before kissreads2."
+    echo "      Filtered reads, the sites found (sites.txt) and a report are written in <prefix>_filtered_reads/."
+    echo "      --trim_sites"
+    echo "           Also remove the sites from the reads."
     echo "      --keep_reads_without_site"
-    echo "           Trim the sites but keep the reads (pairs) that do not start with the site."
+    echo "           Keep the reads (pairs) that do not start with the site."
+    echo "      --no_site_processing (or --no_trim)"
+    echo "           No site detection, no read removal, no trimming, no removal of the variants inside the sites."
     echo "      --trim_r1 <int>"
-    echo "           Trim this number of nucleotides from the 5' end of the reads 1 instead of detecting it."
+    echo "           Length of the site of the reads 1, instead of detecting it."
     echo "      --trim_r2 <int>"
-    echo "           Trim this number of nucleotides from the 5' end of the reads 2 instead of detecting it."
+    echo "           Length of the site of the reads 2, instead of detecting it."
     echo "      Reads 2 are the second file of a sample file of files, or the files named *_R2* / *_2.* ."
     echo ""
     echo "MISC."
@@ -232,8 +238,12 @@ echo "${yellow}"
 
 while :; do
     case $1 in
-    --no_trim)
-        trim_sites=0
+    --no_site_processing|--no_trim)
+        site_processing=0
+        ;;
+
+    --trim_sites)
+        trim_reads="--trim"
         ;;
 
     --keep_reads_without_site)
@@ -496,30 +506,35 @@ fi
 #################### RESTRICTION SITE TRIMMING  #######################
 #######################################################################
 
-if [ $trim_sites -eq 1 ]; then
+sites_file=""
+if [ $site_processing -eq 1 ]; then
     T="$(date +%s)"
     echo "${yellow}     ############################################################"
-    echo "     ################ RESTRICTION SITE TRIMMING #################"
+    echo "     ################ RESTRICTION SITES IN THE READS ############"
     echo "     ############################################################$reset"
-    trimmed_dir=${prefix}_trimmed_reads
-    trimmed_fof=${trimmed_dir}/$(basename ${read_sets})
-    trimCmd="python $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${trimmed_dir} --out_fof ${trimmed_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads} ${keep_reads_without_site}"
-    echo $green$trimCmd$cyan$reset
+    filtered_dir=${prefix}_filtered_reads
+    filtered_fof=${filtered_dir}/$(basename ${read_sets})
+    sitesCmd="python $EDIR/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${filtered_dir} --out_fof ${filtered_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads} ${keep_reads_without_site} ${trim_reads}"
+    echo $green$sitesCmd$cyan$reset
     if [[ "$wraith" == "false" ]]; then
-        $trimCmd
+        $sitesCmd
         if [ $? -ne 0 ]
         then
-            echo "${red}there was a problem with the restriction site trimming$reset"
+            echo "${red}there was a problem with the restriction site detection$reset"
             exit 1
         fi
-        # the script writes the fof only when at least one file was trimmed
-        if [ -f ${trimmed_fof} ]; then
-            read_sets=${trimmed_fof}
+        # the script writes the fof only when at least one file was rewritten (reads removed or trimmed)
+        if [ -f ${filtered_fof} ]; then
+            read_sets=${filtered_fof}
         fi
         T="$(($(date +%s)-T))"
-        echo "${yellow}Restriction site trimming time in seconds: ${T}${reset}"
+        echo "${yellow}Restriction site detection and read filtering time in seconds: ${T}${reset}"
     else
-        read_sets=${trimmed_fof}
+        read_sets=${filtered_fof}
+    fi
+    # the variants inside the sites are removed from the bubbles (unless the sites were trimmed from the reads)
+    if [ -z "${trim_reads}" ]; then
+        sites_file=${filtered_dir}/sites.txt
     fi
 fi
 
@@ -667,6 +682,12 @@ if [ ! -f ${graph_reused} ]; then # no graph was given or the given graph was no
 else
     if [[ "$wraith" == "false" ]]; then
         echo "${yellow}File ${graph_reused} exists. We use it as input graph${reset}"
+        if [ $site_processing -eq 1 ]; then
+            echo "${red}WARNING: the reads are filtered (reads without the restriction site removed, or sites trimmed), but the graph"
+            echo "         ${graph_reused} is reused: it must have been built from the same reads (${read_sets}), otherwise variants"
+            echo "         are called from other k-mers than the reads mapped by kissreads2. Remove -g, or use --no_site_processing"
+            echo "         if the graph was built from the unfiltered reads.${reset}"
+        fi
     fi
 fi
 
@@ -730,6 +751,28 @@ then
 fi
 T="$(($(date +%s)-T))"
 echo "${yellow}Redundacy removal time in seconds: ${T}${reset}"
+
+#######################################################################
+#################### VARIANTS INSIDE THE RESTRICTION SITES ############
+#######################################################################
+
+if [ -n "${sites_file}" ]; then
+    siteVariantsCmd="python $EDIR/preprocessing_scripts/remove_site_variants.py -i $kissprefix.fa -s ${sites_file} -o ${kissprefix}_nosite.fa"
+    echo $green$siteVariantsCmd$cyan$reset
+    if [[ "$wraith" == "false" ]]; then
+        if [ -f ${sites_file} ]; then
+            $siteVariantsCmd
+            if [ $? -ne 0 ]
+            then
+                echo "${red}there was a problem with the removal of the variants inside the restriction sites$reset"
+                exit 1
+            fi
+            mv ${kissprefix}_nosite.fa $kissprefix.fa
+        else
+            echo "${yellow}No restriction site file (${sites_file}): no variant removed${reset}"
+        fi
+    fi
+fi
 
 #######################################################################
 #################### HAPLOTYPE MODE: SEQUENCE CONTEXTS ################

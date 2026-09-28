@@ -3,8 +3,14 @@
 """
 trim_restriction_sites.py
 
-Removes the restriction site remnant at the 5' end of RAD / ddRAD reads before
-discoSnpRad (option of discoSnpRAD/run_discoSnpRad.sh, on by default).
+Detects the restriction site remnant at the 5' end of RAD / ddRAD reads and,
+before discoSnpRad (discoSnpRAD/run_discoSnpRad.sh, on by default):
+  - removes the reads (pairs) that do not start with the site of their file,
+  - with --trim: also removes the site from the reads (not by default: SNPs
+    close to the site are then missed by the variant discovery; the false
+    variants inside the sites are removed from the bubbles instead, see
+    remove_site_variants.py),
+  - writes the sites found (sites.txt in the output directory).
 
 In RAD / ddRAD data every read starting at a restriction site begins with the
 same few nucleotides (the remnant of the site, e.g. TGCAG for PstI, CGG for
@@ -16,8 +22,8 @@ either a read file (fasta/fastq, gzipped or not) or a fof listing the read files
 of the sample (typically R1 and R2). The output fof has the same structure and
 points to the trimmed files. A file needing no trimming is not copied.
 
-Trimmed length, per file
-------------------------
+Site length, per file
+---------------------
   --trim_r1 / --trim_r2 auto (default): detected on the file itself, see below.
   --trim_r1 / --trim_r2 <int>         : fixed length for the reads 1 / reads 2.
 
@@ -392,22 +398,25 @@ def site_pattern(consensus):
 
 def trim_unit(job):
     """One sample line of the fof: its files (1, or R1 and R2...) read together, as pairs.
-    Every file is trimmed; a read (pair) is removed if one of its reads lacks the site of its file.
+    A read (pair) is removed if one of its reads lacks the site of its file (filtering); with trimming,
+    the site is removed from the reads.
     Returns (output paths, reads (pairs) read, reads (pairs) removed, reads too short per file)."""
-    files, out_dir, threads, filtering = job
-    patterns = [site_pattern(consensus) if filtering and trim > 0 and consensus != "." else None
-                for _, _, trim, consensus in files]
+    files, out_dir, threads, filtering, trimming = job
+    patterns = [site_pattern(consensus) if filtering and site > 0 and consensus != "." else None
+                for _, _, site, consensus in files]
+    files = [(index, path, site if trimming else 0, consensus) for index, path, site, consensus in files]
     rewrite = [trim > 0 or any(patterns) for _, _, trim, _ in files]
     if not any(rewrite):
         return [path for _, path, _, _ in files], 0, 0, [0] * len(files)
     readers = [Reader(path) for _, path, _, _ in files]
     targets, writers = [], []
     try:
-        for (index, path, _, _), needed in zip(files, rewrite):
+        for (index, path, trim, _), needed in zip(files, rewrite):
             if needed:
                 stem = SEQUENCE_EXTENSIONS.sub("", os.path.basename(path))
                 kind = "fastq" if first_character(path) == b"@" else "fasta"
-                targets.append(os.path.join(out_dir, f"{index}_{stem}.trimmed.{kind}.gz"))
+                state = "trimmed" if trim else "filtered"
+                targets.append(os.path.join(out_dir, f"{index}_{stem}.{state}.{kind}.gz"))
                 writers.append(Writer(targets[-1], threads))
             else:
                 targets.append(path)
@@ -499,13 +508,15 @@ def parse_length(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-r", "--fof", required=True, help="file of files given to discoSnpRad")
-    parser.add_argument("-o", "--out_dir", required=True, help="directory of the trimmed files")
+    parser.add_argument("-o", "--out_dir", required=True, help="directory of the filtered (trimmed) files")
     parser.add_argument("--out_fof", required=True,
-                        help="fof of the trimmed files (written only if at least one file is trimmed)")
+                        help="fof of the filtered (trimmed) files (written only if at least one file is rewritten)")
     parser.add_argument("--trim_r1", type=parse_length, default=None, metavar="INT|auto",
-                        help="nucleotides removed at the 5' end of the reads 1 [auto]")
+                        help="length of the site at the 5' end of the reads 1 [auto]")
     parser.add_argument("--trim_r2", type=parse_length, default=None, metavar="INT|auto",
-                        help="nucleotides removed at the 5' end of the reads 2 [auto]")
+                        help="length of the site at the 5' end of the reads 2 [auto]")
+    parser.add_argument("--trim", action="store_true",
+                        help="remove the site from the reads (default: the reads keep their site)")
     parser.add_argument("--n_reads", type=int, default=50000, help="reads profiled per file [50000]")
     parser.add_argument("--max_trim", type=int, default=15, help="longest remnant looked for [15]")
     parser.add_argument("--min_site_fraction", type=float, default=0.5,
@@ -548,7 +559,7 @@ def main():
         first += len(sample_files)
         units.append((members, ([(files[i][0], reports[i]["file"], reports[i]["trim"], reports[i]["consensus"])
                                  for i in members], args.out_dir, args.compression_threads,
-                                not args.keep_reads_without_site)))
+                                not args.keep_reads_without_site, args.trim)))
     with ProcessPoolExecutor(max_workers=max(1, min(threads, len(units)))) as pool:
         results = list(pool.map(trim_unit, [job for _, job in units]))
     unit_summaries = []
@@ -559,25 +570,27 @@ def main():
 
     report_file = os.path.join(args.out_dir, "trimming_report.tsv")
     with open(report_file, "w") as handle:
-        handle.write("file\tmate\tmode\treads_profiled\ttrimmed\tconsensus\tprofile_of_the_first_positions"
-                     "\treads\treads_removed_without_site\ttrimmed_file\tnote\twarning\n")
+        handle.write("file\tmate\tmode\treads_profiled\tsite_length\tsite\tprofile_of_the_first_positions"
+                     "\ttrimmed\treads\treads_removed_without_site\toutput_file\tnote\twarning\n")
         for r in reports:
             reads = r.get("reads") or "."
             removed = r.get("reads_removed", ".") if r.get("reads") else "."
             handle.write(f"{r['file']}\tR{r['mate']}\t{r['mode']}\t{r['reads_profiled']}\t{r['trim']}\t"
-                         f"{r['consensus']}\t{r['profile']}\t{reads}\t{removed}\t{r['output']}\t"
+                         f"{r['consensus']}\t{r['profile']}\t{r['trim'] if args.trim else 0}\t{reads}\t{removed}\t{r['output']}\t"
                          f"{r.get('note') or '.'}\t{r['warning'] or '.'}\n")
     for r in reports:
-        text = f"[trim] {os.path.basename(r['file'])} (R{r['mate']}, {r['mode']}): {r['trim']} nt"
-        if r["mode"].startswith("auto") or r["trim"]:
-            text += f" [{r['consensus']}]" if r["trim"] else " (no conserved 5' end)"
+        text = f"[site] {os.path.basename(r['file'])} (R{r['mate']}, {r['mode']}): "
+        if r["trim"]:
+            text += f"{r['consensus']} ({r['trim']} nt, {'trimmed' if args.trim else 'kept in the reads'})"
+        else:
+            text += "no site (no conserved 5' end)"
         if r.get("note"):
             text += f" ({r['note']})"
         if r.get("reads_too_short"):
             text += f", {r['reads_too_short']} reads not longer than that replaced by N"
         log(text)
         if r["warning"]:
-            log(f"[trim] WARNING {os.path.basename(r['file'])}: {r['warning']}")
+            log(f"[site] WARNING {os.path.basename(r['file'])}: {r['warning']}")
     for members, n, n_removed in unit_summaries:
         if not n or args.keep_reads_without_site:
             continue
@@ -593,14 +606,21 @@ def main():
         by_mate.setdefault(r["mate"], Counter())[r["trim"]] += 1
     for mate, lengths in sorted(by_mate.items()):
         if len(lengths) > 1:
-            log(f"[trim] WARNING: the R{mate} files are not trimmed to the same length: "
+            log(f"[site] WARNING: the sites of the R{mate} files do not have the same length: "
                 + ", ".join(f"{n} files {t} nt" for t, n in sorted(lengths.items()))
                 + f" (see {report_file})")
+
+    # the sites found, for remove_site_variants.py (false variants inside the sites)
+    sites = Counter((r["mate"], r["consensus"]) for r in reports if r["trim"] > 0 and r["consensus"] != ".")
+    with open(os.path.join(args.out_dir, "sites.txt"), "w") as handle:
+        handle.write("#mate\tsite\tfiles\ttrimmed_from_the_reads\n")
+        for (mate, site), n in sorted(sites.items()):
+            handle.write(f"R{mate}\t{site}\t{n}\t{'yes' if args.trim else 'no'}\n")
 
     if all(r["output"] == r["file"] for r in reports):
         if os.path.exists(args.out_fof):
             os.remove(args.out_fof)
-        log("[trim] nothing to trim: the input files are used as they are")
+        log("[site] nothing to filter or trim: the input files are used as they are")
         return
 
     # the new fof, same structure as the input one
@@ -620,7 +640,7 @@ def main():
             lines.append(sample_out)
     with open(args.out_fof, "w") as handle:
         handle.write("\n".join(lines) + "\n")
-    log(f"[trim] trimmed read files listed in {args.out_fof} (report: {report_file})")
+    log(f"[site] {'trimmed' if args.trim else 'filtered'} read files listed in {args.out_fof} (report: {report_file})")
 
 
 if __name__ == "__main__":
