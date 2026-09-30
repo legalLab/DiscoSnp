@@ -12,7 +12,8 @@
 #        the locus has two haplotypes in the whole data set)
 #   -H   the prefix of the disco_haplotypes.py outputs (DiscoSnpRad run with -H):
 #        one locus per DiscoSnp locus, sites merged and phased with the reads,
-#        any number of haplotypes and alleles per site
+#        any number of haplotypes and alleles per site; the loci are filtered by
+#        default on their repeat score (RPT <= .5) and LONG flag (see info_fields.txt)
 #
 # No dependencies outside the python standard library
 #
@@ -228,20 +229,21 @@ def bubbles_to_alignment(args, include, output_handle, stats):
 # input 2: the outputs of disco_haplotypes.py (<prefix>.vcf and <prefix>_loci.fa)
 
 def read_loci_fasta(loci_fasta):
-    """Yields (locus name, consensus sequence), streaming."""
+    """Yields (locus name, consensus sequence), streaming. The header is
+    '>locus_N|length_...|n_sites_...|positions_...': the name is its first field."""
     with open(loci_fasta) as handle:
         name = None
         for line in handle:
             line = line.rstrip('\n')
             if line.startswith('>'):
-                name = line[1:]
+                name = line[1:].split('|')[0]
             elif name is not None:
                 yield name, line
                 name = None
 
 
 def read_vcf_loci(vcf_file):
-    """Yields (locus name, samples, [(position, [alleles], info, [sample fields])]) grouped by locus."""
+    """Yields (locus name, samples, [(position, [alleles], info, [sample fields], {INFO flags})]) grouped by locus."""
     samples = None
     locus, sites = None, []
     with open(vcf_file) as handle:
@@ -257,7 +259,8 @@ def read_vcf_loci(vcf_file):
                     yield locus, samples, sites
                 locus, sites = fields[0], []
             info = dict(x.split('=', 1) for x in fields[7].split(';') if '=' in x)
-            sites.append((int(fields[1]), [fields[3]] + fields[4].split(','), info, fields[9:]))
+            flags = {x for x in fields[7].split(';') if x and '=' not in x}
+            sites.append((int(fields[1]), [fields[3]] + fields[4].split(','), info, fields[9:], flags))
     if sites:
         yield locus, samples, sites
 
@@ -275,10 +278,27 @@ def haplotypes_to_alignment(args, include, output_handle, stats):
                 break
         else:
             sys.exit('ERROR: {0} is missing from {1}_loci.fa'.format(locus, prefix))
-        # filter by rank: the lowest rank of the bubbles of the locus
-        ranks = [float(info['RK']) for _, _, info, _ in sites if info.get('RK', '.') != '.']
-        if ranks and min(ranks) < args.minimum_rank:
+        # filter by rank: the median rank of the sites of the locus (Rk: best rank of the bubbles of a site);
+        # the lowest one would let a single low ranked site discard a locus of many sites
+        ranks = sorted(float(info['Rk']) for _, _, info, _, _ in sites if info.get('Rk', '.') != '.')
+        median_rank = None
+        if ranks:
+            half = len(ranks) // 2
+            median_rank = ranks[half] if len(ranks) % 2 else (ranks[half - 1] + ranks[half]) / 2
+        if median_rank is not None and median_rank < args.minimum_rank:
             stats['rank'] += 1
+            continue
+        # filter on the repeat score: the highest RPT of the sites of the locus (RPT = 1 for the repeat
+        # bubbles and the bubbles of giant components, GC)
+        scores = [float(info['RPT']) for _, _, info, _, _ in sites if 'RPT' in info]
+        if not scores:
+            stats['no_rpt'] += 1
+        elif max(scores) > args.maximum_repeat_score:
+            stats['rpt'] += 1
+            continue
+        # filter the loci longer than one ddRAD fragment (LONG flag, run_discoSnpRad.sh -H): chimeras
+        if args.skip_long and any('LONG' in flags for _, _, _, _, flags in sites):
+            stats['long'] += 1
             continue
         # filter on number of polymorphic sites per locus
         if len(sites) < args.minimum_polymorphisms:
@@ -288,7 +308,7 @@ def haplotypes_to_alignment(args, include, output_handle, stats):
         genotypes = []
         for column in range(len(samples)):
             genotype = []
-            for _, _, _, fields in sites:
+            for _, _, _, fields, _ in sites:
                 gt = fields[column].split(':', 1)[0]
                 phased = '|' in gt
                 a, b = gt.replace('|', '/').split('/')
@@ -310,7 +330,7 @@ def haplotypes_to_alignment(args, include, output_handle, stats):
                 continue
             if genotype not in cache:
                 hap_0, hap_1 = list(reference), list(reference)
-                for (position, alleles, _, _), (a, b, phased) in zip(sites, genotype):
+                for (position, alleles, _, _, _), (a, b, phased) in zip(sites, genotype):
                     if a == '.' or b == '.':
                         hap_0[position - 1] = hap_1[position - 1] = 'N'
                         continue
@@ -406,12 +426,18 @@ def main():
     parser.add_argument('-path', help='Path to project directory; default ./', type=str, required=False, default='./')
     parser.add_argument('-cons', help='Generate consensus sequence; default True', type=str, required=False, default='True')
     parser.add_argument('-loc_info', help='Include locus name in header; default False', type=str, required=False, default='False')
-    parser.add_argument('-min_rank', '--minimum_rank', help='minimum rank; parallog metric, default .4 (decimal)', type=float, required=False, default=.4)
+    parser.add_argument('-min_rank', '--minimum_rank', help='minimum rank (Rk with -H: the median of the sites of a locus); '
+                        'parallog metric, default .4 (decimal)', type=float, required=False, default=.4)
+    parser.add_argument('-max_rpt', '--maximum_repeat_score', help='-H only: skip the loci with a site of repeat score RPT above this '
+                        '(repeats, giant components), default .5 (decimal); 1: no filter', type=float, required=False, default=.5)
+    parser.add_argument('-skip_long', help='-H only: skip the loci flagged LONG (longer than one ddRAD fragment: chimeras); '
+                        'default True', type=str, required=False, default='True')
     parser.add_argument('-max_miss', '--maximum_missingness', help='maximum missing data per locus, default .5 (decimal)', type=float, required=False, default=.5)
     parser.add_argument('-min_poly', '--minimum_polymorphisms', help='minimum number of SNPs per locus, default 3 (integer)', type=int, required=False, default=3)
     args = parser.parse_args()
     args.cons = str2bool(args.cons)
     args.loc_info = str2bool(args.loc_info)
+    args.skip_long = str2bool(args.skip_long)
 
     include = read_lookup(os.path.join(args.path, args.lookup))
     stats = defaultdict(int)
@@ -426,6 +452,8 @@ def main():
     print('********')
     print('Number of loci available: {0}'.format(stats['available']))
     for key, text in (('indel', 'INDEL bubbles skipped'), ('rank', 'loci below the minimum rank'),
+                      ('rpt', 'loci above the maximum repeat score (RPT)'), ('long', 'loci flagged LONG'),
+                      ('no_rpt', 'loci without RPT (older disco_haplotypes version): not filtered on it'),
                       ('poly', 'loci with too few polymorphisms'), ('miss', 'loci with too much missing data'),
                       ('no_sample', 'loci without any sample of the lookup table')):
         if stats[key]:
