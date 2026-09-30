@@ -37,6 +37,11 @@ that belong to a locus with several bubbles.  10 million bubbles need a few GB.
 
 INDEL bubbles are ignored (kissreads2 does not phase them); they remain in the
 usual DiscoSnp VCF.
+
+tools/disco_haplotypes (C++, built with DiscoSnp as build/bin/disco_haplotypes)
+implements the same three sub-commands with the same options and gives the same
+files (byte for byte), about 20 times faster; run_discoSnp++.sh and
+discoSnpRAD/run_discoSnpRad.sh use it when it is built.  Keep both in step.
 """
 
 import argparse
@@ -46,6 +51,7 @@ import math
 import os
 import re
 import sys
+import types
 from collections import defaultdict, Counter
 
 try:
@@ -76,6 +82,10 @@ MAX_PATH_LENGTH = 1000                       # upper-case part of a path
 MAX_FLANK = 1500                             # lower-case extension kept on each side for the placement
 OFFSET_BITS = 13                             # placement offsets (full sequences) must fit in +-2^12
 CHUNK_ROWS = 50000                           # rows (paths) handled at once by the numpy steps
+# tolerated mismatches in the overlap of two bubbles: max_mismatches + max_divergence x overlap
+STRICT_PLACEMENT = (1, 0.01)                 # default: 1 mismatch over 60 nt, 4 over 300 nt
+RELAXED_PLACEMENT = (4, 0.02)                # --relaxed_placement (previous versions): 5 mismatches over 60 nt
+VERIFY_CHUNK = 100000                        # candidate placements verified at once (memory ~ VERIFY_CHUNK x path length x 20 B)
 
 
 def revcomp(sequence):
@@ -414,6 +424,14 @@ def seed_windows(rows, flens, fstart, ulens, higher, k, sampling, query):
     return codes[r, c], r, c
 
 
+def placement_view(store, indices):
+    """The paths (with their extensions) of some bubbles only, for sequence_edges (bubble i of the view is
+    bubble indices[i] of the store)."""
+    rows = np.stack([2 * indices, 2 * indices + 1], axis=1).ravel()
+    return types.SimpleNamespace(n=len(indices), F=store.F[rows], flens=store.flens[rows],
+                                 fstart=store.fstart[rows], lens=store.lens[rows], max_flen=store.max_flen)
+
+
 def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_divergence=0.02, sampling=8,
                    max_candidates=64):
     """Edges between bubbles whose paths overlap, from the sequences alone.
@@ -501,29 +519,32 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_divergence
     # ---- verification: best of the 2 x 2 path pairs, grouped by (offset, orientation)
     best_mm = np.full(len(qb), 10 ** 6, dtype=np.int32)
     best_ov = np.zeros(len(qb), dtype=np.int32)
-    groups = np.unique(np.stack([rel, o], axis=1), axis=0)
-    for rel_v, o_v in groups.tolist():
-        selected = np.nonzero((rel == rel_v) & (o == o_v))[0]
+    order = np.lexsort((o, rel))                 # candidates grouped by (orientation, offset)
+    bounds = np.nonzero(np.diff(rel[order]) | np.diff(o[order]))[0] + 1
+    for group in np.split(order, bounds):
+        rel_v, o_v = int(rel[group[0]]), int(o[group[0]])
         a, b = max(0, o_v), max(0, -o_v)
         width = store.max_flen - max(a, b)
         if width <= 0:
             continue
-        group_mm = np.full(len(selected), 10 ** 6, dtype=np.int32)
-        group_ov = np.zeros(len(selected), dtype=np.int32)
-        for qi in (0, 1):
-            Q = F[2 * qb[selected] + qi]
-            if rel_v == -1:
-                Q = revcomp_rows(Q, flens[2 * qb[selected] + qi])
-            QS = Q[:, a:a + width]
-            for ti in (0, 1):
-                TS = F[2 * tb[selected] + ti][:, b:b + width]
-                valid = (QS != PAD) & (TS != PAD)
-                overlap = valid.sum(axis=1).astype(np.int32)
-                mismatches = ((QS != TS) & valid).sum(axis=1).astype(np.int32)
-                better = (mismatches < group_mm) | ((mismatches == group_mm) & (overlap > group_ov))
-                group_mm = np.where(better, mismatches, group_mm)
-                group_ov = np.where(better, overlap, group_ov)
-        best_mm[selected], best_ov[selected] = group_mm, group_ov
+        for g0 in range(0, len(group), VERIFY_CHUNK):    # bounded memory, whatever the size of the group
+            selected = group[g0:g0 + VERIFY_CHUNK]
+            group_mm = np.full(len(selected), 10 ** 6, dtype=np.int32)
+            group_ov = np.zeros(len(selected), dtype=np.int32)
+            for qi in (0, 1):
+                Q = F[2 * qb[selected] + qi]
+                if rel_v == -1:
+                    Q = revcomp_rows(Q, flens[2 * qb[selected] + qi])
+                QS = Q[:, a:a + width]
+                for ti in (0, 1):
+                    TS = F[2 * tb[selected] + ti][:, b:b + width]
+                    valid = (QS != PAD) & (TS != PAD)
+                    overlap = valid.sum(axis=1).astype(np.int32)
+                    mismatches = ((QS != TS) & valid).sum(axis=1).astype(np.int32)
+                    better = (mismatches < group_mm) | ((mismatches == group_mm) & (overlap > group_ov))
+                    group_mm = np.where(better, mismatches, group_mm)
+                    group_ov = np.where(better, overlap, group_ov)
+            best_mm[selected], best_ov[selected] = group_mm, group_ov
     accepted = ((best_ov >= min_overlap) & (best_mm * 10 <= best_ov)
                 & (best_mm <= max_mismatches + np.floor(max_divergence * best_ov)))
     qb, tb, o, rel, best_mm, best_ov = (a[accepted] for a in (qb, tb, o, rel, best_mm, best_ov))
@@ -546,6 +567,20 @@ def sequence_edges(store, seed_size, max_mismatches, min_overlap, max_divergence
     log(f"[edges] {len(b1)} sequence overlaps between bubbles ({n_hits} seed hits,"
         f" {n_repetitive} repetitive seeds ignored)")
     return b1, b2, shift, rel
+
+
+def remove_repeats(edges, n, max_overlaps):
+    """Bubbles overlapping more than max_overlaps other bubbles are copies of repeats (paralogs, transposable
+    elements...): their placement edges would chain unrelated loci into giant components.
+    Returns (edges without these bubbles, degree [n], bool [n] of the removed bubbles)."""
+    b1, b2, shift, rel = edges
+    degree = np.bincount(np.concatenate([b1, b2]), minlength=n)[:n] if n else np.zeros(0, dtype=np.int64)
+    repeat = degree > max_overlaps if max_overlaps > 0 else np.zeros(n, dtype=bool)
+    keep = ~(repeat[b1] | repeat[b2]) if len(b1) else np.zeros(0, dtype=bool)
+    if repeat.any():
+        log(f"[repeats] {int(repeat.sum())} bubbles overlap more than {max_overlaps} other bubbles: repeats, kept as isolated bubbles"
+            f" ({int((~keep).sum())} placement edges)")
+    return (b1[keep], b2[keep], shift[keep], rel[keep]), degree, repeat
 
 
 ###############################################################################
@@ -679,6 +714,129 @@ def fact_edges(fact_files, store):
     if not keys:
         return tuple(np.zeros(0, dtype=np.int64) for _ in range(4))
     return tuple(np.array(column, dtype=np.int64) for column in zip(*sorted(keys)))
+
+
+COMPLEMENT_CODES = np.array([3, 2, 1, 0, 4], dtype=np.uint8)
+
+
+def read_link_agrees(store, a, b, shift, rel, min_overlap, max_mismatches, max_divergence):
+    """True when the extended higher paths of bubbles a and b, placed as the read link says, agree as
+    two bubbles placed by sequence must (sequence_edges): an overlap of at least min_overlap nucleotides
+    (A, C, G, T in both) with at most max_mismatches + max_divergence of the overlap mismatches (strict
+    by default, --relaxed_placement) and at most 10 %. kissreads2 maps a read with up to -d
+    substitutions, so a read also maps to the similar bubbles of other loci (paralogs, repeat copies):
+    such a read links bubbles whose sequences disagree."""
+    la, sa = int(store.flens[2 * a]), int(store.fstart[2 * a])
+    lb, sb = int(store.flens[2 * b]), int(store.fstart[2 * b])
+    # position j of b's extended path -> position shift + rel * (j - sb) + sa of a's
+    base = shift - rel * sb + sa
+    if rel == 1:
+        j0, j1 = max(0, -base), min(lb, la - base)
+        if j1 <= j0:
+            return False
+        xa = store.F[2 * a, j0 + base:j1 + base]
+        xb = store.F[2 * b, j0:j1]
+    else:
+        j0, j1 = max(0, base - la + 1), min(lb, base + 1)
+        if j1 <= j0:
+            return False
+        xa = store.F[2 * a, base - j1 + 1:base - j0 + 1][::-1]
+        xb = COMPLEMENT_CODES[store.F[2 * b, j0:j1]]
+    both = (xa < 4) & (xb < 4)
+    overlap = int(both.sum())
+    mismatches = int((both & (xa != xb)).sum())
+    return (overlap >= min_overlap and mismatches * 10 <= overlap
+            and mismatches <= max_mismatches + math.floor(max_divergence * overlap))
+
+
+PARENT_EDGE, SEQUENCE_EDGE, READ_EDGE = 0, 1, 2
+
+
+def limit_locus_edges(edges, kind, store, max_locus_length, min_overlap, max_mismatches, max_divergence):
+    """Selects the placement edges that build the loci.
+
+    Read links (kissreads2 facts) are kept only if the two bubbles agree in sequence where the link
+    places them (read_link_agrees): reads mapping to several copies of a repeat link bubbles whose
+    sequences disagree.
+
+    With max_locus_length > 0 (ddRAD: 2 x read length - k, the longest fragment the paired reads can
+    assemble), the loci are also kept within that length. Components are grown in a union-find keeping,
+    for every component, the placement of its bubbles (offset, orientation in the frame of its root) and
+    its extent (extensions included): first the synthetic -> parent edges (a synthetic bubble lies in its
+    parent), then the sequence overlaps, then the read links, in their order. A sequence overlap or read
+    link is rejected when it would make its component longer than max_locus_length, or when both bubbles
+    are already in one component and the edge contradicts their placement (the rejected contradictions
+    are returned: they are counted as placement conflicts of the locus). Every locus then has one
+    placement, not longer than max_locus_length.
+    edges: (b1, b2, shift, rel) arrays; kind: array of PARENT_EDGE, SEQUENCE_EDGE, READ_EDGE.
+    Returns (bool array of the edges kept, Counter of the removals, [b1 of the rejected contradictions]).
+    """
+    keep = np.ones(len(kind), dtype=bool)
+    columns = [e.tolist() for e in edges]
+    kinds = kind.tolist()
+    removed = Counter()
+    for i in range(len(kinds)):
+        if kinds[i] == READ_EDGE and not read_link_agrees(store, columns[0][i], columns[1][i], columns[2][i],
+                                                          columns[3][i], min_overlap, max_mismatches, max_divergence):
+            keep[i] = False
+            removed["read_disagree"] += 1
+    contradictions = []
+    if max_locus_length <= 0:
+        return keep, removed, contradictions
+    parent, offset, orient, low, high = {}, {}, {}, {}, {}
+    left, right, lens = store.left, store.right, store.lens
+
+    def find(x):
+        """Root of x; offset/orient of x become relative to the root (coordinate in the root frame
+        = offset[x] + orient[x] * coordinate in the frame of x)."""
+        if x not in parent:
+            parent[x], offset[x], orient[x] = x, 0, 1
+            low[x] = -int(left[2 * x])
+            high[x] = max(int(lens[2 * x]), int(lens[2 * x + 1])) + int(right[2 * x]) - 1
+            return x
+        path = []
+        while parent[x] != x:
+            path.append(x)
+            x = parent[x]
+        for node in reversed(path):              # nearest to the root first: its parent is already the root
+            up = parent[node]
+            if up != x:
+                offset[node] = offset[up] + orient[up] * offset[node]
+                orient[node] = orient[up] * orient[node]
+                parent[node] = x
+        return x
+
+    def union(a, b, shift, rel, check):
+        """Edge: coordinate in the frame of a = shift + rel * coordinate in the frame of b.
+        Returns None (accepted), "long" or "contradiction"."""
+        root_a, root_b = find(a), find(b)
+        offset_a, orient_a = (0, 1) if a == root_a else (offset[a], orient[a])
+        offset_b, orient_b = (0, 1) if b == root_b else (offset[b], orient[b])
+        if root_a == root_b:
+            if check and (offset_a + orient_a * shift, orient_a * rel) != (offset_b, orient_b):
+                return "contradiction"
+            return None
+        o = orient_a * rel * orient_b                       # frame of root_b -> frame of root_a
+        t = offset_a + orient_a * shift - o * offset_b
+        first, last = sorted((t + o * low[root_b], t + o * high[root_b]))
+        merged_low, merged_high = min(low[root_a], first), max(high[root_a], last)
+        if check and merged_high - merged_low + 1 > max_locus_length:
+            return "long"
+        parent[root_b], offset[root_b], orient[root_b] = root_a, t, o
+        low[root_a], high[root_a] = merged_low, merged_high
+        return None
+
+    for current in (PARENT_EDGE, SEQUENCE_EDGE, READ_EDGE):
+        name = ("", "sequence", "read")[current]
+        for i in range(len(kinds)):
+            if keep[i] and kinds[i] == current:
+                why = union(columns[0][i], columns[1][i], columns[2][i], columns[3][i], current != PARENT_EDGE)
+                if why is not None:
+                    keep[i] = False
+                    removed[f"{name}_{why}"] += 1
+                    if why == "contradiction":
+                        contradictions.append(columns[0][i])
+    return keep, removed, contradictions
 
 
 ###############################################################################
@@ -888,12 +1046,18 @@ def snp_counts(store):
     return counts
 
 
-def multi_bubble_loci(store, edges, max_locus_bubbles, lone_multi_snp=False):
+def multi_bubble_loci(store, edges, max_locus_bubbles, lone_multi_snp=False, synthetic=None, excluded=None,
+                      oversized_out=None):
     """Materialise the bubbles of the components (2..max_locus_bubbles bubbles), build their loci.
+
+    synthetic: bool [store.n], the synthetic bubbles, which are not counted in the size of a
+    component (a locus with a few SNPs may have hundreds of synthetic bubbles: they do not make
+    it a repeat).
 
     lone_multi_snp: also make a locus of every bubble linked to no other one but
     holding several SNPs (needed by 'augment': the recombinant haplotypes of a
     lone multi-SNP bubble are only counted through its single-SNP versions).
+    oversized_out: bool [store.n], set for the bubbles of the components larger than max_locus_bubbles.
     Returns (loci, {index: Bubble}).
     """
     components = connected_components(edges[0], edges[1])
@@ -903,17 +1067,27 @@ def multi_bubble_loci(store, edges, max_locus_bubbles, lone_multi_snp=False):
         linked = np.zeros(store.n, dtype=bool)
         linked[edges[0]] = True
         linked[edges[1]] = True
-        for index in np.nonzero(~linked & (snp_counts(store) > 1))[0].tolist():
+        lone = ~linked & (snp_counts(store) > 1)
+        if excluded is not None:
+            lone &= ~excluded
+        for index in np.nonzero(lone)[0].tolist():
             materialised[index] = Bubble(store, index)
+    def size(members):
+        return len(members) if synthetic is None else int((~synthetic[members]).sum())
+
+    oversized = 0
     for members in components.values():
-        if len(members) > max_locus_bubbles:
+        if size(members) > max_locus_bubbles:
             n_oversized += len(members)
+            oversized += 1
+            if oversized_out is not None:
+                oversized_out[members] = True
             continue
         for index in members:
             materialised[index] = Bubble(store, index)
     loci = build_loci(materialised, edges)
     if n_oversized:
-        log(f"[loci] {n_oversized} bubbles belong to {sum(1 for m in components.values() if len(m) > max_locus_bubbles)}"
+        log(f"[loci] {n_oversized} bubbles belong to {oversized}"
             f" components larger than --max_locus_bubbles ({max_locus_bubbles}): probably repeats, treated as isolated bubbles")
     return loci, materialised
 
@@ -926,14 +1100,22 @@ def canonical_pair(path_1, path_2):
     return frozenset((min(path_1, revcomp(path_1)), min(path_2, revcomp(path_2))))
 
 
-def sub_bubble(bubble, snp_index, locus, max_contexts):
-    """Single-SNP versions of one SNP of a bubble, in every context seen in the locus.
+def sub_bubble(bubble, snp_index, locus, max_contexts, seed_window=31):
+    """Single-SNP versions of one SNP of a bubble, in the contexts needed by kissreads2.
 
     The paths are cropped to the flanks kissnp2 gives to an isolated SNP (k-1 on
     each side when the bubble is closed), so that every read mapped by kissreads2
     (overlap of at least k) covers the SNP: the read counts become site specific.
     This is not the case for a multi-SNP bubble, where a read covering the last
     SNP only is still counted for the whole path.
+    kissreads2 anchors a read with an exact seed (26 nt, indexed every 6 nt of the
+    path: a stretch of seed_window = 31 nt without variation guarantees one) and
+    then accepts substitutions outside the SNPs of the bubble. When the window of
+    the SNP holds such a stretch free of the other sites of the locus, reads
+    carrying any allele at the other sites are counted: a single version is
+    written (the other sites take the allele of the higher path in both paths).
+    Otherwise the SNP is written in the combinations of alleles of its nearest
+    sites (at most max_contexts).
     Yields (start_in_parent_path, context_label, [sequence_higher, sequence_lower], capped).
     """
     position = bubble.snps[snp_index][0]
@@ -952,6 +1134,26 @@ def sub_bubble(bubble, snp_index, locus, max_contexts):
     inside = [c for c in locus.sites
               if c != site and 0 <= bubble.position(c) - start < shortest]
     inside.sort(key=lambda c: abs(c - site))   # nearest first: they are the ones breaking the seeds
+    blocked = sorted(bubble.position(c) - start for c in inside)
+    gaps = [b - a - 1 for a, b in zip([-1] + blocked, blocked + [shortest])]
+    if max(gaps) >= seed_window:
+        # a read is anchored whatever its alleles at the other sites: one version, higher path alleles
+        contexts = [tuple(bubble.nucleotide(0, c) for c in inside)]
+        used, capped = inside, False
+        for context in contexts:
+            sequences = []
+            for path_index, (left, template, right) in enumerate(templates):
+                path = list(template)
+                for coordinate, nucleotide in zip(used, context):
+                    if nucleotide is None:
+                        continue
+                    if bubble.orient == -1:
+                        nucleotide = complement(nucleotide)
+                    path[bubble.position(coordinate) - start] = nucleotide
+                path[position - start] = bubble.snps[snp_index][1 + path_index]
+                sequences.append(left + "".join(path) + right)
+            yield start, ".", sequences, capped
+        return
     used, n_contexts, capped = [], 1, False
     for coordinate in inside:
         if n_contexts * len(locus.sites[coordinate]) > max_contexts:
@@ -977,7 +1179,8 @@ def augment(args):
     store = parse_store(args.input, max_flank=args.max_flank)
     edges = sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap,
                            args.max_divergence, args.seed_sampling)
-    loci, materialised = multi_bubble_loci(store, edges, args.max_locus_bubbles, lone_multi_snp=True)
+    edges, _, repeat = remove_repeats(edges, store.n, args.max_overlaps)
+    loci, materialised = multi_bubble_loci(store, edges, args.max_locus_bubbles, lone_multi_snp=True, excluded=repeat)
     loci = [locus for locus in loci if len(locus.sites) > 1]
     for number, locus in enumerate(loci, 1):
         locus.name = f"locus_{number}"
@@ -1017,7 +1220,7 @@ def augment(args):
                     for snp_index, (position, _, _) in enumerate(bubble.snps):
                         capped = False
                         for start, label, sequences, capped in sub_bubble(bubble, snp_index, locus,
-                                                                          args.max_contexts):
+                                                                          args.max_contexts, args.seed_window):
                             pair = canonical_pair(*("".join(c for c in s if c.isupper()) for s in sequences))
                             if pair in existing:
                                 continue
@@ -1061,7 +1264,11 @@ def call_genotypes(depths, n_alleles, min_depth):
     gt is -1 where the depth is below min_depth.
     """
     genotypes, W = MODELS[n_alleles]
-    LL = depths.astype(np.float64) @ W.T
+    # explicit sum over the alleles, in their order (no BLAS: reproducible to the last bit)
+    D = depths.astype(np.float64)
+    LL = np.zeros((len(D), len(genotypes)))
+    for i in range(n_alleles):
+        LL = LL + D[:, i:i + 1] * W[:, i][None, :]
     best = LL.max(axis=1, keepdims=True)
     PL = np.minimum(np.rint(-10 * (LL - best)), 9999).astype(np.uint16)
     which = PL.argmin(axis=1)
@@ -1142,7 +1349,7 @@ def phase_from_votes(genotypes, pair_votes, min_support):
                 same = (n1 == genotypes[c1][0]) == (n2 == genotypes[c2][0])
                 votes[(c1, c2)] += support if same else -support
     forest = ParityUnionFind(het)
-    for (c1, c2), vote in sorted(votes.items(), key=lambda kv: -abs(kv[1])):
+    for (c1, c2), vote in sorted(votes.items(), key=lambda kv: (-abs(kv[1]), kv[0])):
         if abs(vote) >= min_support:
             forest.union(c1, c2, 0 if vote > 0 else 1)
     blocks = defaultdict(list)
@@ -1247,7 +1454,7 @@ def fact_fragments(parts, materialised, site_specific_of):
     return per_locus, n_conflicts
 
 
-FRAGMENT_CACHE_SIZE = 2_000_000
+FRAGMENT_CACHE_BYTES = 1 << 30              # texts of facts cached (the same facts recur in every read set)
 
 
 def cached_fragments(text, cache, by_id, site_specific_of, stats, site_facts=False):
@@ -1268,9 +1475,56 @@ def cached_fragments(text, cache, by_id, site_specific_of, stats, site_facts=Fal
     value = tuple((name, tuple((c, n) for c, n in observed.items() if n is not None))
                   for name, observed in per_locus.items())
     value = tuple(v for v in value if v[1])
-    if len(cache) < FRAGMENT_CACHE_SIZE:
+    if cache.get(None, 0) < FRAGMENT_CACHE_BYTES:
         cache[text] = value
+        cache[None] = cache.get(None, 0) + len(text)      # size of the cached texts
     return value
+
+
+DUST_WINDOW = 64                           # nucleotides around a site for its low complexity score
+DUST_LEVEL = 20                            # dustmasker default: a window scoring 20 or more is masked
+
+
+def low_complexity(sequence, center):
+    """LC: DUST score of the 64 nt around a position (triplets with N ignored), / 20, capped at 1:
+    1 = low complexity region (masked by dustmasker with its default level)."""
+    b = min(len(sequence), max(0, center - DUST_WINDOW // 2) + DUST_WINDOW)
+    window = sequence[max(0, b - DUST_WINDOW):b].upper()
+    counts = Counter(window[i:i + 3] for i in range(len(window) - 2)
+                     if window[i] in "ACGT" and window[i + 1] in "ACGT" and window[i + 2] in "ACGT")
+    n = sum(counts.values())
+    if n <= 1:
+        return 0.0
+    return min(1.0, sum(c * (c - 1) // 2 for c in counts.values()) / (n - 1) / DUST_LEVEL)
+
+
+def repeat_scores(degree, depth, median_depth, max_overlaps):
+    """OVS: number of overlapped bubbles, log(1 + degree) / log(1 + max_overlaps), capped at 1 (1: repeat).
+    DPS: excess of read depth, 1 - exp(-(depth / median depth - 1)), 0 at or below the median depth."""
+    reference = max_overlaps if max_overlaps > 0 else 50
+    ovs = min(1.0, math.log1p(degree) / math.log1p(reference))
+    dps = 0.0 if median_depth <= 0 else 1.0 - math.exp(-max(0.0, depth / median_depth - 1.0))
+    return ovs, dps
+
+
+def repeat_info(ovs, dps, lc, giant=False, too_long=False):
+    """RPT = max(OVS, DPS), 1 for the bubbles of a giant component (GC flag); LONG flag for a locus
+    longer than --max_locus_length."""
+    rpt = 1.0 if giant else max(ovs, dps)
+    return (f";RPT={rpt:.3f};OVS={ovs:.3f};DPS={dps:.3f};LC={lc:.3f}"
+            + (";GC" if giant else "") + (";LONG" if too_long else ""))
+
+
+def too_long(length, max_locus_length):
+    return 0 < max_locus_length < length
+
+
+def median(values):
+    values = sorted(values)
+    n = len(values)
+    if not n:
+        return 0.0
+    return float(values[n // 2]) if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
 
 
 def info_field(rank, meta, cluster, cluster_size, n_real, n_synthetic, bubble_ids, n_sites, conflicts):
@@ -1445,19 +1699,25 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
     for number, d in enumerate(data, 1):
         locus = d.locus
         locus.name = f"locus_{number}"
+        consensus = locus_sequence(locus, {})
         for i, coordinate in enumerate(d.coordinates):
             site = d.site_base + i
             alleles = d.alleles[coordinate]
             A = len(alleles)
             n_multiallelic += A > 2
-            involved = {b for cs in locus.sites[coordinate].values() for b, _ in cs}
-            real = [b for b in involved if b.parent is None] or list(involved)
-            best = max(real, key=lambda b: -1.0 if b.rank is None else b.rank)
+            involved = sorted({b for cs in locus.sites[coordinate].values() for b, _ in cs}, key=lambda b: b.index)
+            real = [b for b in involved if b.parent is None] or involved
+            best = max(real, key=lambda b: -1.0 if b.rank is None else b.rank)   # the first (lowest index) of the best
             info = info_field(best.rank, best.meta, number, 2 * d.n_real,
                               sum(1 for b in involved if b.parent is None),
                               sum(1 for b in involved if b.parent is not None),
                               sorted(b.id for b in involved if b.parent is None),
                               len(d.coordinates), locus.conflicts)
+            degree = max((int(args.degree[b.index]) for b in involved if b.parent is None), default=0)
+            depth = int(AD[site_sa[site]:site_sa[site] + A].astype(np.int64).sum())
+            ovs, dps = repeat_scores(degree, depth, args.median_depth, args.max_overlaps)
+            info += repeat_info(ovs, dps, low_complexity(consensus, coordinate),
+                                too_long=too_long(locus.length, args.max_locus_length))
             columns = [locus.name, str(coordinate + 1), f"{locus.name}_{coordinate + 1}", alleles[0],
                        ",".join(alleles[1:]), ".", ".", info, "GT:PS:DP:AD:GQ:PL"]
             ad = AD[site_sa[site]:site_sa[site] + A].T.tolist()
@@ -1506,7 +1766,7 @@ def call_multi_loci(loci, materialised, store, fact_files, args, vcf, hap_file, 
         fasta.write(f">{locus.name}|{header}\n"
                     f"{locus_sequence(locus, {c: iupac(a) for c, a in d.alleles.items()})}\n")
         reference = "".join(d.alleles[c][0] for c in d.coordinates)
-        write_alleles(alleles_fasta, locus.name, header, locus_sequence(locus, {}), d.coordinates,
+        write_alleles(alleles_fasta, locus.name, header, consensus, d.coordinates,
                       seen, reference, partial)
     log(f"[call] {len(data)} loci with several bubbles: {n_sites} sites, {n_multiallelic} with more than two alleles,"
         f" {sum(l.conflicts for l in loci)} placement conflicts, {n_conflicts} contradictory observations in facts")
@@ -1569,10 +1829,15 @@ def call_single_bubbles(store, indices, first_number, args, vcf, hap_file, names
             sample_columns = "\t".join(fields)
             info = info_field(None if math.isnan(ranks[j]) else ranks[j], metas[j], number - 1, 2, 1, 0, [ids[j]],
                               len(positions), 0)
+            ovs, dps = repeat_scores(int(args.degree[index]), int(depths[j].astype(np.int64).sum()),
+                                     args.median_depth, args.max_overlaps)
+            extended = bytes(store.F[2 * index, :store.flens[2 * index]]).translate(DECODE).decode()
+            giant, long_locus = bool(args.giant[index]), too_long(lengths[j], args.max_locus_length)
             for position in positions:
                 pos = offset + position + 1
+                lc = low_complexity(extended, int(store.fstart[2 * index]) + position)
                 vcf.write(f"{name}\t{pos}\t{name}_{pos}\t{higher[position]}\t{lower[position]}"
-                          f"\t.\t.\t{info}\tGT:PS:DP:AD:GQ:PL\t{sample_columns}\n")
+                          f"\t.\t.\t{info}{repeat_info(ovs, dps, lc, giant, long_locus)}\tGT:PS:DP:AD:GQ:PL\t{sample_columns}\n")
             n_sites += len(positions)
             hap_h = "".join(higher[p] for p in positions)
             hap_l = "".join(lower[p] for p in positions)
@@ -1642,6 +1907,11 @@ VCF_HEADER = """##fileformat=VCFv4.2
 ##INFO=<ID=BUB,Number=.,Type=String,Description="Ids of the kissnp2 bubbles describing this site">
 ##INFO=<ID=NSITES,Number=1,Type=Integer,Description="Number of sites of the locus">
 ##INFO=<ID=PC,Number=1,Type=Integer,Description="Bubble placement conflicts in this locus (repeats, paralogs)">
+##INFO=<ID=RPT,Number=1,Type=Float,Description="Repeat score, 0-1: max(OVS, DPS); 1 = repeated (multi-copy) region">
+##INFO=<ID=OVS,Number=1,Type=Float,Description="Overlap score, 0-1: log(1 + bubbles overlapped by the bubbles of the site) / log(1 + --max_overlaps), capped at 1">
+##INFO=<ID=DPS,Number=1,Type=Float,Description="Depth score, 0-1: 1 - exp(-(site depth / median bubble depth - 1)), 0 at or below the median">
+##INFO=<ID=LC,Number=1,Type=Float,Description="Low complexity score, 0-1: DUST score of the 64 nt around the site / 20 (dustmasker level), capped at 1">
+##INFO=<ID=GC,Number=0,Type=Flag,Description="Bubble of a component larger than --max_locus_bubbles (bubbles chained by repeats, genotyped one at a time): RPT set to 1">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype; | = phased with the other sites of the locus sharing its PS, / = not phased">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set (position of its first site)">
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sum of the allele depths">
@@ -1689,12 +1959,56 @@ def call(args):
             parent_edges[2].append(shift)
             parent_edges[3].append(1)
     edges = [np.array(e, dtype=np.int64) for e in parent_edges]
-    for source in (sequence_edges(store, args.seed_size, args.max_mismatches, args.min_overlap,
-                                  args.max_divergence, args.seed_sampling),
-                   fact_edges(fact_files, store)):
+    # the synthetic bubbles are placed by their parent (above): only the kissnp2 bubbles are placed by
+    # sequence. Most synthetic bubbles overlap all the others of their locus at the same place: with them,
+    # the number of candidate placements grows with the square of the number of bubbles of the locus.
+    real = np.nonzero(~np.isin(store.ids, synthetic_ids))[0]
+    view_edges = sequence_edges(placement_view(store, real), args.seed_size, args.max_mismatches,
+                                args.min_overlap, args.max_divergence, args.seed_sampling)
+    (b1, b2, shift, rel), degree, repeat_view = remove_repeats(view_edges, len(real), args.max_overlaps)
+    kind = np.concatenate([np.full(len(edges[0]), PARENT_EDGE), np.full(len(b1), SEQUENCE_EDGE)])
+    for source in ((real[b1], real[b2], shift, rel), fact_edges(fact_files, store)):
         edges = [np.concatenate([a, b]) for a, b in zip(edges, source)]
-    edges = tuple(edges)
-    loci, materialised = multi_bubble_loci(store, edges, args.max_locus_bubbles)
+    kind = np.concatenate([kind, np.full(len(edges[0]) - len(kind), READ_EDGE)])
+    # the repeats are kept as isolated bubbles (no edge, their RPT is 1), their synthetic bubbles are removed
+    repeat = np.zeros(store.n, dtype=bool)
+    repeat[real[repeat_view]] = True
+    excluded = np.zeros(store.n, dtype=bool)
+    repeat_ids = set(store.ids[repeat].tolist())
+    for synthetic_id, (parent_id, _) in parents.items():
+        if parent_id in repeat_ids:
+            index = store.index_of(synthetic_id)
+            if index >= 0:
+                excluded[index] = True
+    unlinked = repeat | excluded
+    keep = ~(unlinked[edges[0]] | unlinked[edges[1]])
+    edges, kind = tuple(e[keep] for e in edges), kind[keep]
+    # read links of multi-mapping reads, and with --max_locus_length the edges making a locus longer than
+    # one ddRAD fragment or contradicting a placement, are removed
+    keep, removed, contradictions = limit_locus_edges(edges, kind, store, args.max_locus_length, args.min_overlap,
+                                                      args.max_mismatches, args.max_divergence)
+    log(f"[facts] {int((kind == READ_EDGE).sum())} read links: {removed['read_disagree']} removed, the sequences of their"
+        f" bubbles disagree (multi-mapping reads)")
+    if args.max_locus_length > 0:
+        log(f"[loci] --max_locus_length {args.max_locus_length}: removed {removed['sequence_long']} sequence overlaps and"
+            f" {removed['read_long']} read links making a longer locus, {removed['sequence_contradiction']} sequence overlaps"
+            f" and {removed['read_contradiction']} read links contradicting a placement (counted as placement conflicts)")
+    edges = tuple(e[keep] for e in edges)
+    # repeat scores of the sites: overlapped bubbles, depth excess (median over the kissnp2 bubbles)
+    args.degree = np.zeros(store.n, dtype=np.int64)
+    args.degree[real] = degree
+    bubble_depth = store.counts[2 * real].astype(np.int64).sum(axis=1) + store.counts[2 * real + 1].astype(np.int64).sum(axis=1)
+    args.median_depth = median(bubble_depth.tolist())
+    with open(args.out + "_repeats.tsv", "w") as handle:
+        handle.write("bubble_id\toverlapped_bubbles\n")
+        for i in np.nonzero(repeat_view)[0].tolist():
+            handle.write(f"{int(store.ids[real[i]])}\t{int(degree[i])}\n")
+    args.giant = np.zeros(store.n, dtype=bool)
+    loci, materialised = multi_bubble_loci(store, edges, args.max_locus_bubbles,
+                                           synthetic=np.isin(store.ids, synthetic_ids), oversized_out=args.giant)
+    for index in contradictions:                  # edges removed for contradicting the placement of their locus
+        if index in materialised:
+            materialised[index].locus.conflicts += 1
     for bubble in materialised.values():
         if bubble.id in parents:
             bubble.parent = parents[bubble.id][0]
@@ -1704,8 +2018,8 @@ def call(args):
     in_locus = np.zeros(store.n, dtype=bool)
     in_locus[list(materialised)] = True
     is_synthetic = np.isin(store.ids, synthetic_ids)
-    singles = np.nonzero(~in_locus & ~is_synthetic)[0]
-    n_dropped = int((~in_locus & is_synthetic).sum())
+    singles = np.nonzero(~in_locus & ~is_synthetic & ~excluded)[0]
+    n_dropped = int((~in_locus & is_synthetic & ~excluded).sum())
     if n_dropped:
         log(f"[call] {n_dropped} synthetic bubbles without their parent bubble were dropped")
     if args.min_sites > 1:
@@ -1718,7 +2032,11 @@ def call(args):
             open(args.out + "_loci.tsv", "w") as locus_file, \
             open(args.out + "_loci.fa", "w") as fasta, \
             open(args.out + "_alleles.fa", "w") as alleles_fasta:
-        vcf.write(VCF_HEADER)
+        header = VCF_HEADER
+        if args.max_locus_length > 0:
+            line = f'##INFO=<ID=LONG,Number=0,Type=Flag,Description="Locus longer than --max_locus_length ({args.max_locus_length} bp): longer than one ddRAD fragment sequenced by the reads (2 x read length - k), probably a chimera (paralogs, repeats)">\n'
+            header = header.replace("##FORMAT=<ID=GT,", line + "##FORMAT=<ID=GT,", 1)
+        vcf.write(header)
         # contig lines: multi-bubble loci first, then isolated bubbles, in the order the records follow
         for number, locus in enumerate(loci, 1):
             vcf.write(f"##contig=<ID=locus_{number},length={locus.length}>\n")
@@ -1766,16 +2084,27 @@ def strip(args):
 def add_placement_options(parser):
     parser.add_argument("--seed_size", type=int, default=16,
                         help="exact seed used to find overlapping bubble paths [16]")
-    parser.add_argument("--max_mismatches", type=int, default=4,
-                        help="mismatches tolerated in the overlap of two paths (other contexts) [4]")
+    parser.add_argument("--max_mismatches", type=int, default=None,
+                        help="mismatches tolerated in the overlap of two paths (other alleles of the locus)"
+                             f" [{STRICT_PLACEMENT[0]}; {RELAXED_PLACEMENT[0]} with --relaxed_placement]")
     parser.add_argument("--min_overlap", type=int, default=25,
                         help="minimal overlap between two paths [25]")
     parser.add_argument("--max_flank", type=int, default=1000,
                         help=f"lower-case extension (kissnp2 -t/-T) used on each side to place the bubbles"
                              f" of a locus [1000, max {MAX_FLANK}]")
-    parser.add_argument("--max_divergence", type=float, default=0.02,
+    parser.add_argument("--max_divergence", type=float, default=None,
                         help="extra mismatches tolerated per overlapping nucleotide (other alleles of the locus"
-                             " in the extensions) [0.02]")
+                             f" in the extensions) [{STRICT_PLACEMENT[1]}; {RELAXED_PLACEMENT[1]} with --relaxed_placement]")
+    parser.add_argument("--relaxed_placement", action="store_true",
+                        help=f"tolerance of the previous versions ({RELAXED_PLACEMENT[0]} mismatches +"
+                             f" {RELAXED_PLACEMENT[1] * 100:.0f}%% of the overlap): links more bubbles, but also the copies"
+                             " of repeats (paralogs, transposable elements) into giant loci")
+    parser.add_argument("--max_overlaps", type=int, default=50,
+                        help="a bubble whose paths overlap more than this number of other bubbles is a repeat: it is"
+                             " not merged with other bubbles: written as a locus of its own, with RPT=1 (and listed in"
+                             " <out>_repeats.tsv). The bubbles of"
+                             " ordinary RAD loci overlap a few others (at most 42 on a 10 samples ddRAD data set,"
+                             " 99.9 %% at most 31), the copies of repeats up to thousands [50, 0: no limit]")
     parser.add_argument("--seed_sampling", type=int, default=8,
                         help="one extension k-mer in N is used as seed [8]")
     parser.add_argument("--max_locus_bubbles", type=int, default=500,
@@ -1793,6 +2122,9 @@ def main():
     sub.add_argument("-m", "--map", required=True, help="output table: synthetic bubble -> parent bubble")
     sub.add_argument("--max_contexts", type=int, default=32,
                      help="maximal number of contexts written for one SNP [32]")
+    sub.add_argument("--seed_window", type=int, default=31,
+                     help="stretch without variation anchoring a read in kissreads2 (seed size + index stride - 1)"
+                          " [31]: SNPs with such a stretch get a single synthetic version")
     add_placement_options(sub)
     sub.set_defaults(function=augment)
 
@@ -1811,6 +2143,11 @@ def main():
     sub.add_argument("--min_sites", type=int, default=1,
                      help="write only the loci with at least this many sites (2: skip the isolated bubbles,"
                           " which the usual DiscoSnp VCF already describes) [1]")
+    sub.add_argument("--max_locus_length", type=int, default=0,
+                     help="ddRAD: 2 x read length - k, the longest fragment the paired reads can assemble (set by"
+                          " run_discoSnpRad.sh). Two bubbles are joined (sequence overlap or reads) only if the locus"
+                          " is not longer and its placements agree, and the sites of the loci longer than this (one"
+                          " bubble with long extensions) get the LONG flag [0: no limit, no flag]")
     add_placement_options(sub)
     sub.set_defaults(function=call)
 
@@ -1823,6 +2160,12 @@ def main():
     args = parser.parse_args()
     if getattr(args, "max_flank", 0) > MAX_FLANK:
         parser.error(f"--max_flank cannot exceed {MAX_FLANK}")
+    if hasattr(args, "relaxed_placement"):
+        defaults = RELAXED_PLACEMENT if args.relaxed_placement else STRICT_PLACEMENT
+        if args.max_mismatches is None:
+            args.max_mismatches = defaults[0]
+        if args.max_divergence is None:
+            args.max_divergence = defaults[1]
     args.function(args)
 
 
