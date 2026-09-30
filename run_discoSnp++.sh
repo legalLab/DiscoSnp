@@ -91,6 +91,14 @@ option_phase_variants=""
 haplotypes=0
 bwa_distance=4
 
+# locus-level calling (-H): the C++ implementation when it is built, the python script otherwise (same outputs)
+if [ -x $EDIR/build/bin/disco_haplotypes ]; then
+    haplotypes_bin=$EDIR/build/bin/disco_haplotypes
+elif [ -x $EDIR/bin/disco_haplotypes ]; then
+    haplotypes_bin=$EDIR/bin/disco_haplotypes
+else
+    haplotypes_bin="python $EDIR/scripts/disco_haplotypes.py"
+fi
 #######################################################################
 #################### END HEADER                 #######################
 #######################################################################
@@ -151,7 +159,7 @@ function help {
     echo -e "\t\t default 0"
 
     echo -e "\t -H | --haplotypes"
-    echo -e "\t\t Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
+    echo -e "\t\t Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (disco_haplotypes, C++, or scripts/disco_haplotypes.py)."
     echo -e "\t\t Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
     echo -e "\t\t then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
 
@@ -619,7 +627,7 @@ if [ $haplotypes -eq 1 ]; then
     fi
     # Write every SNP bubble in the other contexts seen at the close SNPs of its locus:
     # kissreads2 needs an exact seed of k-5 nt, reads carrying other alleles nearby are lost otherwise.
-    augmentCmd="python $EDIR/scripts/disco_haplotypes.py augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
+    augmentCmd="${haplotypes_bin} augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
     echo $green$augmentCmd$cyan
     if [[ "$wraith" == "false" ]]; then
         $augmentCmd
@@ -720,7 +728,7 @@ if [ $haplotypes -eq 1 ]; then
     echo "${yellow}     ############################################################"
     echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
     echo "     ############################################################$reset"
-    haplotypesCmd="python $EDIR/scripts/disco_haplotypes.py call -c ${kissprefix}_coherent.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes"
+    haplotypesCmd="${haplotypes_bin} call -c ${kissprefix}_coherent.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes"
     echo $green$haplotypesCmd$cyan
     if [[ "$wraith" == "false" ]]; then
         $haplotypesCmd
@@ -728,7 +736,7 @@ if [ $haplotypes -eq 1 ]; then
         # The synthetic bubbles are removed EVEN IF call failed, so that no downstream tool
         # (clustering, VCF, fasta converters) ever sees them: the usual fasta and VCF outputs are the same as without -H
         for fasta_file in ${kissprefix}_coherent.fa ${kissprefix}_uncoherent.fa; do
-            python $EDIR/scripts/disco_haplotypes.py strip -i ${fasta_file} -o ${fasta_file}_stripped -m ${kissprefix}_synthetic_bubbles.tsv
+            ${haplotypes_bin} strip -i ${fasta_file} -o ${fasta_file}_stripped -m ${kissprefix}_synthetic_bubbles.tsv
             mv ${fasta_file}_stripped ${fasta_file}
         done
         if [ $haplotypes_status -ne 0 ]

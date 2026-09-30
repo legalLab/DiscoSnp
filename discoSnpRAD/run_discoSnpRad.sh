@@ -107,7 +107,34 @@ trim_reads=""         # --trim_sites: also remove the sites from the reads (not 
 trim_r1="auto"        # length of the site of the reads 1, or auto-detected
 trim_r2="auto"        # length of the site of the reads 2, or auto-detected
 keep_reads_without_site=""   # by default the reads (pairs) not starting with the site are removed
+max_locus_length="auto"      # -H: LONG flag for the loci longer than 2 x read length - k (auto), or this length (0: no flag)
 nb_threads=0
+# locus-level calling (-H): the C++ implementation when it is built, the python script otherwise (same outputs)
+if [ -x $EDIR/../build/bin/disco_haplotypes ]; then
+    haplotypes_bin=$EDIR/../build/bin/disco_haplotypes
+elif [ -x $EDIR/../bin/disco_haplotypes ]; then
+    haplotypes_bin=$EDIR/../bin/disco_haplotypes
+else
+    haplotypes_bin="python $EDIR/../scripts/disco_haplotypes.py"
+fi
+
+# longest read of the first 1000 reads of each read file of a file of files (lines: read files or files of files)
+max_read_length() {
+    local line first
+    while read -r line; do
+        [ -z "$line" ] && continue
+        first=$(gzip -cdf "$line" 2>/dev/null | head -c 1)
+        if [ "$first" == "@" ] || [ "$first" == ">" ]; then
+            gzip -cdf "$line" 2>/dev/null | head -n 4000 | awk '
+                NR == 1 { fastq = (substr($0, 1, 1) == "@") }
+                fastq && NR % 4 == 2 { if (length($0) > m) m = length($0) }
+                !fastq { if (substr($0, 1, 1) == ">") { if (l > m) m = l; l = 0 } else l += length($0) }
+                END { if (l > m) m = l; print m + 0 }'
+        elif [ -f "$line" ]; then
+            max_read_length "$line"
+        fi
+    done < "$1" | sort -n | tail -n 1
+}
 #######################################################################
 #################### END HEADER                 #######################
 #######################################################################
@@ -186,9 +213,14 @@ function help {
     echo "      -d | --max_substitutions <int>"
     echo "           Set the number of authorized substitutions used while mapping reads on found SNPs (kissreads). Default=10"
     echo "      -H | --haplotypes"
-    echo "           Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (scripts/disco_haplotypes.py)."
+    echo "           Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (disco_haplotypes, C++, or scripts/disco_haplotypes.py)."
     echo "           Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
     echo "           then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
+    echo "      --max_locus_length <int>"
+    echo "           With -H: the longest ddRAD fragment the paired reads can assemble. Two bubbles are joined into one locus"
+    echo "           (sequence overlap or reads) only if the locus stays within this length, and the sites of longer loci"
+    echo "           (bubbles with long contig extensions: probably chimeras) get the LONG flag. Default: 2 x read length - k, the read length being the longest read of"
+    echo "           the first 1000 reads of each read file. 0: no limit, no flag."
     echo ""
     echo "RESTRICTION SITES (preprocessing_scripts/trim_restriction_sites.py and remove_site_variants.py)"
     echo "      By default the restriction site remnant at the 5' end of the reads (e.g. TGCAG for PstI, CGG for MspI)"
@@ -244,6 +276,15 @@ while :; do
 
     --trim_sites)
         trim_reads="--trim"
+        ;;
+
+    --max_locus_length)
+        if [ "$2" ] && [[ "$2" =~ ^[0-9]+$ ]] ; then
+            max_locus_length=$2
+            shift 1
+        else
+            die 'ERROR: "'$1'" option requires a length in nucleotides.'
+        fi
         ;;
 
     --keep_reads_without_site)
@@ -792,7 +833,7 @@ if [ $haplotypes -eq 1 ]; then
     # Done AFTER the redundancy removal, which keeps a single context per SNP.
     # Write every SNP bubble in the other contexts seen at the close SNPs of its locus:
     # kissreads2 needs an exact seed of k-5 nt, reads carrying other alleles nearby are lost otherwise.
-    augmentCmd="python $EDIR/../scripts/disco_haplotypes.py augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
+    augmentCmd="${haplotypes_bin} augment -i $kissprefix.fa -o ${kissprefix}_augmented.fa -m ${kissprefix}_synthetic_bubbles.tsv"
     echo $green$augmentCmd$cyan
     if [[ "$wraith" == "false" ]]; then
         $augmentCmd
@@ -875,14 +916,24 @@ if [ $haplotypes -eq 1 ]; then
     echo "${yellow}     ############################################################"
     echo "     ############ HAPLOTYPE MODE: SEQUENCE CONTEXTS #############"
     echo "     ############################################################$reset"
-    haplotypesCmd="python $EDIR/../scripts/disco_haplotypes.py call -c ${kissprefix}_raw.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes"
+    if [ "$max_locus_length" == "auto" ]; then
+        # the longest ddRAD fragment the paired reads can assemble: the two reads overlap by at least k
+        read_length=$(max_read_length ${read_sets})
+        if [ -n "$read_length" ] && [ "$read_length" -gt 0 ]; then
+            max_locus_length=$((2 * read_length - k))
+        else
+            max_locus_length=0
+        fi
+        echo "           longest read: ${read_length:-unknown} nt, loci longer than ${max_locus_length} nt are flagged LONG (0: no flag)"
+    fi
+    haplotypesCmd="${haplotypes_bin} call -c ${kissprefix}_raw.fa -u ${kissprefix}_uncoherent.fa -m ${kissprefix}_synthetic_bubbles.tsv -p phased_alleles_read_set_id_*.txt -s $(ls phased_sites_read_set_id_*.txt 2>/dev/null) -o ${kissprefix}_haplotypes --max_locus_length ${max_locus_length}"
     echo $green$haplotypesCmd$cyan
     if [[ "$wraith" == "false" ]]; then
         $haplotypesCmd
         haplotypes_status=$?
         # The synthetic bubbles are removed EVEN IF call failed, so that no downstream tool
         # (clustering, VCF, fasta converters) ever sees them: clustering and the usual VCF are the same as without -H
-        python $EDIR/../scripts/disco_haplotypes.py strip -i ${kissprefix}_raw.fa -o ${kissprefix}_raw.fa_stripped -m ${kissprefix}_synthetic_bubbles.tsv
+        ${haplotypes_bin} strip -i ${kissprefix}_raw.fa -o ${kissprefix}_raw.fa_stripped -m ${kissprefix}_synthetic_bubbles.tsv
         mv ${kissprefix}_raw.fa_stripped ${kissprefix}_raw.fa
         if [ $haplotypes_status -ne 0 ]
         then
