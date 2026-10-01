@@ -85,6 +85,13 @@ chmod +x $EDIR/scripts/*.sh $EDIR/run_discoSnpRad.sh 2>/dev/null # Usefull for b
 
 useref=""
 wraith="false"
+site_processing=0     # --site_processing (RAD/ddRAD data): detect the restriction sites, remove the reads without site
+                      # and the variants inside the sites (discoSnpRAD/preprocessing_scripts)
+trim_reads=""         # --trim_sites: also remove the sites from the reads
+trim_r1="auto"        # length of the site of the reads 1, or auto-detected
+trim_r2="auto"        # length of the site of the reads 2, or auto-detected
+keep_reads_without_site=""   # by default the reads (pairs) not starting with the site are removed
+nb_threads=0
 genome=""
 bwa_path_option=""
 option_phase_variants=""
@@ -162,6 +169,21 @@ function help {
     echo -e "\t\t Locus level calling: multi-allelic sites, close SNPs and read-backed haplotypes (disco_haplotypes, C++, or scripts/disco_haplotypes.py)."
     echo -e "\t\t Adds the missing sequence contexts of close SNPs before kissreads2, runs kissreads2 with -phasing,"
     echo -e "\t\t then writes <prefix>_haplotypes.vcf, .tsv, _loci.tsv, _loci.fa and _alleles.fa. The usual outputs are unchanged."
+
+    echo -e "\nRESTRICTION SITES (RAD / ddRAD data; discoSnpRAD/preprocessing_scripts; off by default)"
+    echo -e "\t --site_processing"
+    echo -e "\t\t Detect the restriction site remnant at the 5' end of the reads of every file (e.g. TGCAG for PstI),"
+    echo -e "\t\t remove the reads (pairs) that do not start with it and the false variants inside the sites."
+    echo -e "\t\t Filtered reads, the sites found (sites.txt) and a report are written in <prefix>_filtered_reads/."
+    echo -e "\t\t See discoSnpRAD/COOKBOOK.md, section 5. run_discoSnpRad.sh does this by default."
+    echo -e "\t --no_site_processing"
+    echo -e "\t\t No restriction site processing (default)."
+    echo -e "\t --trim_sites"
+    echo -e "\t\t With --site_processing: also remove the sites from the reads."
+    echo -e "\t --keep_reads_without_site"
+    echo -e "\t\t With --site_processing: keep the reads (pairs) that do not start with the site."
+    echo -e "\t --trim_r1 <int>, --trim_r2 <int>"
+    echo -e "\t\t With --site_processing: length of the site of the reads 1 / 2, instead of detecting it."
 
     echo -e "\nREFERENCE GENOME AND/OR VCF CREATION OPTIONS"
     echo -e "\t -G | --reference_genome <file name>"
@@ -391,8 +413,34 @@ while :; do
         e="-e" # map with extensions to the reference genome
         ;;
 
+    --site_processing)
+        site_processing=1
+        ;;
+
+    --no_site_processing|--no_trim)
+        site_processing=0
+        ;;
+
+    --trim_sites)
+        trim_reads="--trim"
+        ;;
+
+    --keep_reads_without_site)
+        keep_reads_without_site="--keep_reads_without_site"
+        ;;
+
+    --trim_r1|--trim_r2)
+        if [ "$2" ] && [[ "$2" =~ ^[0-9]+$ ]] ; then
+            if [ "$1" == "--trim_r1" ]; then trim_r1=$2; else trim_r2=$2; fi
+            shift 1
+        else
+            die 'ERROR: "'$1'" option requires a number of nucleotides.'
+        fi
+        ;;
+
     -u|--max_threads)
         if [ "$2" ] && [ ${2:0:1} != "-" ] ; then
+            nb_threads=$2
             option_cores_gatb="-nb-cores $2"
             option_cores_post_analysis="-t $2"
             shift
@@ -454,6 +502,48 @@ fi
 kissprefix=${h5prefix}_D_${D}_P_${P}_b_${b}
 readsFilesDump=${prefix}_read_files_correspondance.txt
 mapped_readsFilesDump=${prefix}_mapped_read_files_correspondance.txt
+
+#######################################################################
+#################### RESTRICTION SITES (--site_processing) ############
+#######################################################################
+
+sites_file=""
+if [ $site_processing -eq 1 ]; then
+    if [ -z "$read_sets" ]; then
+        die 'ERROR: --site_processing requires the read sets (-r).'
+    fi
+    T="$(date +%s)"
+    echo "${yellow}     ############################################################"
+    echo "     ################ RESTRICTION SITES IN THE READS ############"
+    echo "     ############################################################$reset"
+    filtered_dir=${prefix}_filtered_reads
+    filtered_fof=${filtered_dir}/$(basename ${read_sets})
+    sitesCmd="python $EDIR/discoSnpRAD/preprocessing_scripts/trim_restriction_sites.py -r ${read_sets} -o ${filtered_dir} --out_fof ${filtered_fof} --trim_r1 ${trim_r1} --trim_r2 ${trim_r2} --threads ${nb_threads} ${keep_reads_without_site} ${trim_reads}"
+    echo $green$sitesCmd$cyan$reset
+    if [[ "$wraith" == "false" ]]; then
+        $sitesCmd
+        if [ $? -ne 0 ]
+        then
+            echo "${red}there was a problem with the restriction site detection$reset"
+            exit 1
+        fi
+        # the script writes the fof only when at least one file was rewritten (reads removed or trimmed)
+        if [ -f ${filtered_fof} ]; then
+            read_sets=${filtered_fof}
+        fi
+        T="$(($(date +%s)-T))"
+        echo "${yellow}Restriction site detection and read filtering time in seconds: ${T}${reset}"
+    else
+        read_sets=${filtered_fof}
+    fi
+    # the variants inside the sites are removed from the bubbles (unless the sites were trimmed from the reads)
+    if [ -z "${trim_reads}" ]; then
+        sites_file=${filtered_dir}/sites.txt
+    fi
+    if [ ! -z "${read_sets_kissreads}" ]; then
+        echo "${red}WARNING: the reads of the mapping file of files (${read_sets_kissreads}) are not filtered for their restriction site${reset}"
+    fi
+fi
 
 
 #######################################
@@ -552,6 +642,12 @@ if [ ! -f ${graph_reused} ]; then # no graph was given or the given graph was no
 else
     if [[ "$wraith" == "false" ]]; then
         echo -e "$yellow File ${graph_reused} exists. We use it as input graph$reset"
+        if [ $site_processing -eq 1 ]; then
+            echo "${red}WARNING: the reads are filtered (reads without the restriction site removed, or sites trimmed), but the graph"
+            echo "         ${graph_reused} is reused: it must have been built from the same reads (${read_sets}), otherwise variants"
+            echo "         are called from other k-mers than the reads mapped by kissreads2. Remove -g, or use --no_site_processing"
+            echo "         if the graph was built from the unfiltered reads.${reset}"
+        fi
     fi
 fi
 
@@ -596,6 +692,28 @@ then
         date
         echo -e " Thanks for using discoSnp++ - http://colibread.inria.fr/discoSnp/$reset"
         exit 
+    fi
+fi
+
+#######################################################################
+#################### VARIANTS INSIDE THE RESTRICTION SITES ############
+#######################################################################
+
+if [ -n "${sites_file}" ]; then
+    siteVariantsCmd="python $EDIR/discoSnpRAD/preprocessing_scripts/remove_site_variants.py -i $kissprefix.fa -s ${sites_file} -o ${kissprefix}_nosite.fa"
+    echo $green$siteVariantsCmd$cyan$reset
+    if [[ "$wraith" == "false" ]]; then
+        if [ -f ${sites_file} ]; then
+            $siteVariantsCmd
+            if [ $? -ne 0 ]
+            then
+                echo "${red}there was a problem with the removal of the variants inside the restriction sites$reset"
+                exit 1
+            fi
+            mv ${kissprefix}_nosite.fa $kissprefix.fa
+        else
+            echo "${yellow}No restriction site file (${sites_file}): no variant removed${reset}"
+        fi
     fi
 fi
 

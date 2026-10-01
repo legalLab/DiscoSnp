@@ -234,12 +234,14 @@ function help {
     echo "        - the reads keep their site (trimming them makes kissnp2 miss SNPs close to the sites),"
     echo "        - the false variants inside the sites are removed from the bubbles before kissreads2."
     echo "      Filtered reads, the sites found (sites.txt) and a report are written in <prefix>_filtered_reads/."
+    echo "      --site_processing"
+    echo "           Detect the sites, remove the reads without site and the variants inside the sites (default)."
+    echo "      --no_site_processing (or --no_trim)"
+    echo "           No site detection, no read removal, no trimming, no removal of the variants inside the sites."
     echo "      --trim_sites"
     echo "           Also remove the sites from the reads."
     echo "      --keep_reads_without_site"
     echo "           Keep the reads (pairs) that do not start with the site."
-    echo "      --no_site_processing (or --no_trim)"
-    echo "           No site detection, no read removal, no trimming, no removal of the variants inside the sites."
     echo "      --trim_r1 <int>"
     echo "           Length of the site of the reads 1, instead of detecting it."
     echo "      --trim_r2 <int>"
@@ -270,6 +272,10 @@ echo "${yellow}"
 
 while :; do
     case $1 in
+    --site_processing)
+        site_processing=1
+        ;;
+
     --no_site_processing|--no_trim)
         site_processing=0
         ;;
