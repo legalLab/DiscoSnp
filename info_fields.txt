@@ -77,8 +77,57 @@ NSITES   Number of variable sites of the locus (number of records with this
 
 PC       Placement conflicts of the locus: number of bubble pairs whose
          relative placement (from the sequences or from the reads) disagrees
-         with the placement retained. 0 is expected; a positive value points
-         to repeats or paralogs merged in one locus.
+         with the placement retained. With --max_locus_length (set by
+         run_discoSnpRad.sh -H) these placements are not used: PC counts
+         them. 0 is expected; a positive value points to repeats or
+         paralogs merged in one locus.
+
+Repeat and low complexity scores (all sites, 0 to 1, 3 decimals)
+
+RPT      Repeat score: max(OVS, DPS), and 1 for the bubbles flagged GC.
+         Close to 1 = the site probably lies in a repeated (multi-copy)
+         region: its genotypes may mix paralogous copies.
+
+OVS      Overlap score: log(1 + d) / log(1 + M), capped at 1, where d is the
+         number of other bubbles the bubbles of the site overlap (share a
+         placement with, before the loci are built) and M is
+         --max_overlaps (default 50). OVS = 1 at d >= M; bubbles with
+         d > M are repeats: each is written as a locus of its own (not
+         merged with other bubbles, genotypes not phased), with OVS = RPT = 1,
+         and listed in <prefix>_haplotypes_repeats.tsv.
+
+DPS      Depth score: 1 - exp(-(D / m - 1)), 0 when D <= m, where D is the
+         read depth of the site (all alleles, all samples) and m the median
+         depth of the kissnp2 bubbles of the data set (both paths, all
+         samples). DPS = 0.63 at twice the median depth, 0.86 at 3 times,
+         0.95 at 4 times.
+
+LC       Low complexity score: DUST score (as dustmasker: sum over the
+         triplets of c(c-1)/2, divided by the number of triplets - 1) of the
+         64 nt of the locus sequence around the site (triplets with N
+         ignored), divided by 20 (dustmasker's default masking level) and
+         capped at 1. LC = 1: the window would be masked by dustmasker.
+
+Flags (present or absent)
+
+GC       The bubble belongs to a component of more than --max_locus_bubbles
+         (default 500) kissnp2 bubbles: loci chained together by repeat
+         copies through their sequence overlaps or the reads. Such
+         bubbles are genotyped one at a time (single-bubble loci) and get
+         RPT = 1 whatever their OVS and DPS.
+
+LONG     The locus is longer than --max_locus_length (the value is written
+         in the header line of LONG). run_discoSnpRad.sh -H sets it to
+         2 x read length - k (269 for PE150 reads and k = 31): the longest
+         ddRAD fragment the two reads of a pair can assemble, since they
+         must share at least one k-mer. A longer locus cannot be a single
+         ddRAD fragment: probably a chimera (paralogs, repeats, contig
+         extensions running into another locus). Not written when
+         --max_locus_length is 0 (the default of disco_haplotypes and of
+         run_discoSnp++.sh). The same length limits the loci: two bubbles
+         are joined (by their sequence overlap or by the reads) only if the
+         locus stays within it, so a LONG locus is a single kissnp2 bubble
+         whose own contig extensions are longer than one fragment.
 
 
 FORMAT, for reference
