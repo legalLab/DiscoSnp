@@ -14,8 +14,10 @@ add_executable (${PROJECT_NAME}  ${ProjectFiles})
 target_compile_options (${PROJECT_NAME} PRIVATE -ffp-contract=off)
 
 find_package (OpenMP)
-if (OpenMP_CXX_FOUND)
+if (TARGET OpenMP::OpenMP_CXX)
     target_link_libraries (${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
+elseif (OPENMP_FOUND)                                   # CMake < 3.9: no imported target
+    set_target_properties (${PROJECT_NAME} PROPERTIES COMPILE_FLAGS "${OpenMP_CXX_FLAGS}" LINK_FLAGS "${OpenMP_CXX_FLAGS}")
 endif ()
 
 INSTALL (TARGETS ${PROJECT_NAME} DESTINATION bin)
