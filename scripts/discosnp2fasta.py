@@ -75,6 +75,52 @@ def read_lookup(lookup_file):
     return include
 
 
+def data_samples(args):
+    """The samples (Gx) present in the input: the VCF header (-H) or the genotype fields of the first bubble (-i)."""
+    if args.infile:
+        for header_a, _, _, _ in read_bubbles(os.path.join(args.path, args.infile)):
+            return [field.split('_', 1)[0] for field in header_a.split('|') if GENOTYPE_PATTERN.match(field)]
+        return []
+    with open(os.path.join(args.path, args.haplotypes) + '.vcf') as handle:
+        for line in handle:
+            if line.startswith('#CHROM'):
+                return line.rstrip('\n').split('\t')[9:]
+            if not line.startswith('#'):
+                break
+    sys.exit('ERROR: no #CHROM header line in {0}.vcf'.format(os.path.join(args.path, args.haplotypes)))
+
+
+def match_lookup(include, samples):
+    """Keeps the lookup entries of the samples present in the data; warns about the others.
+
+    include: {Gx: taxon} of the lookup table, or None (no -l): every sample of the data, under its own name.
+    When the samples of the data already carry the taxon names (VCF renamed, e.g. with bcftools reheader),
+    they are not renamed: the lookup table only selects and orders them.
+    """
+    if include is None:
+        return {sample: sample for sample in samples}
+    taxa = set(include.values())
+    by_id = sum(1 for sample in samples if sample in include)
+    by_name = sum(1 for sample in samples if sample in taxa)
+    if by_name > by_id:
+        sys.stderr.write('NOTE: the samples of the data are already named ({0} of {1} match taxon names of the lookup '
+                         'table): they are not renamed\n'.format(by_name, len(samples)))
+        include = {taxon: taxon for taxon in include.values()}
+    absent = [sample for sample in include if sample not in samples]
+    if absent:
+        sys.stderr.write('WARNING: {0} sample(s) of the lookup table are not in the data and are left out of the alignment: '
+                         '{1}\n'.format(len(absent), ', '.join(x if x == include[x] else '{0} ({1})'.format(x, include[x])
+                                                                for x in absent)))
+    unlisted = [sample for sample in samples if sample not in include]
+    if unlisted:
+        sys.stderr.write('WARNING: {0} sample(s) of the data are not in the lookup table and are left out of the alignment: '
+                         '{1}\n'.format(len(unlisted), ', '.join(unlisted)))
+    kept = {sample: taxon for sample, taxon in include.items() if sample in samples}
+    if not kept:
+        sys.exit('ERROR: no sample of the lookup table is in the data (data samples: {0})'.format(', '.join(samples[:10])))
+    return kept
+
+
 class Alignment:
     """Per taxon lists of sequence chunks (one chunk per locus), joined only at the end.
 
@@ -422,7 +468,10 @@ def main():
     source.add_argument('-H', '--haplotypes', help='prefix of the disco_haplotypes.py outputs (<prefix>.vcf and <prefix>_loci.fa); '
                         'DiscoSnpRad run with -H', type=str)
     parser.add_argument('-o', '--outfile', help='Output file base name (fasta and nexus)', type=str, required=True)
-    parser.add_argument('-l', '--lookup', help='Gx to sample lookup table (tab separated); in project directory', type=str, required=True)
+    parser.add_argument('-l', '--lookup', help='Gx to sample lookup table (tab separated); in project directory. Optional: '
+                        'without it the samples keep their names; with -H, a VCF whose samples already carry the names '
+                        'of the table (bcftools reheader) is not renamed, the table only selects and orders the samples',
+                        type=str, required=False, default=None)
     parser.add_argument('-path', help='Path to project directory; default ./', type=str, required=False, default='./')
     parser.add_argument('-cons', help='Generate consensus sequence; default True', type=str, required=False, default='True')
     parser.add_argument('-loc_info', help='Include locus name in header; default False', type=str, required=False, default='False')
@@ -439,7 +488,8 @@ def main():
     args.loc_info = str2bool(args.loc_info)
     args.skip_long = str2bool(args.skip_long)
 
-    include = read_lookup(os.path.join(args.path, args.lookup))
+    lookup = read_lookup(os.path.join(args.path, args.lookup)) if args.lookup else None
+    include = match_lookup(lookup, data_samples(args))
     stats = defaultdict(int)
     with open(os.path.join(args.path, args.outfile + '.pseudo.fasta'), 'w') as output_handle:
         if args.infile:
