@@ -122,21 +122,21 @@ def match_lookup(include, samples):
 
 
 class Alignment:
-    """Per taxon lists of sequence chunks (one chunk per locus), joined only at the end.
+    """Per taxon lists of sequence chunks (one chunk per locus), joined only at the end: the consensus
+    (haplotypes collapsed, IUPAC codes at the heterozygous sites) and the two haplotypes.
 
     The chunks of samples with the same genotype are the same string object, so a
-    locus costs one reference per taxon, whatever its length.
+    locus costs three references per taxon, whatever its length.
     """
 
-    def __init__(self, taxa, cons):
+    def __init__(self, taxa):
         self.taxa = taxa
-        self.cons = cons
-        self.chunks = {x: ([], []) for x in taxa}
+        self.chunks = {x: ([], [], []) for x in taxa}
         self.partitions = []
         self.length = 0
 
     def add_locus(self, sequences):
-        """sequences: {taxon: (allele_0, allele_1)} or {taxon: (consensus,)} for every taxon."""
+        """sequences: {taxon: (consensus, haplotype_1, haplotype_2)} for every taxon."""
         n = len(next(iter(sequences.values()))[0])
         for taxon in self.taxa:
             for k, chunk in enumerate(sequences[taxon]):
@@ -144,16 +144,39 @@ class Alignment:
         self.partitions.append('CHARSET p{0}={1}-{2};'.format(len(self.partitions) + 1, self.length + 1, self.length + n))
         self.length += n
 
-    def rows(self):
-        """[(name, sequence)] in the order of the lookup table."""
+    def rows(self, kind):
+        """[(name, sequence)] in the order of the lookup table: 'consensus' (one row per taxon) or
+        'haplotypes' (two rows per taxon, <taxon>_1 and <taxon>_2)."""
         rows = []
         for taxon in self.taxa:
-            if self.cons:
+            if kind == 'consensus':
                 rows.append((taxon, ''.join(self.chunks[taxon][0])))
             else:
-                rows.append((taxon + '_0', ''.join(self.chunks[taxon][0])))
                 rows.append((taxon + '_1', ''.join(self.chunks[taxon][1])))
+                rows.append((taxon + '_2', ''.join(self.chunks[taxon][2])))
         return rows
+
+
+def write_pseudo(handles, loc_info, taxon, locus, consensus, haplotypes, haplotype_names):
+    """One locus of a taxon in the .pseudo.fasta files: the consensus, and the two haplotypes
+    (haplotype_names: the name of the locus or bubble path of each haplotype, for -loc_info)."""
+    if handles.get('consensus'):
+        if loc_info:
+            handles['consensus'].write('>{0}_c_{1}\n{2}\n'.format(taxon, locus, consensus))
+        else:
+            handles['consensus'].write('>{0}_{1}\n{2}\n'.format(taxon, locus, consensus))
+    if handles.get('haplotypes'):
+        for k in (0, 1):
+            if loc_info:
+                handles['haplotypes'].write('>{0}_{1}_{2}\n{3}\n'.format(taxon, k + 1, haplotype_names[k], haplotypes[k]))
+            else:
+                handles['haplotypes'].write('>{0}_{1}\n{2}\n'.format(taxon, k + 1, haplotypes[k]))
+
+
+def end_pseudo_locus(handles):
+    for handle in handles.values():
+        if handle:
+            handle.write('\n')
 
 
 ########
@@ -194,9 +217,9 @@ def parse_bubble_header(header):
     return rank, nb_pol, genotypes
 
 
-def bubbles_to_alignment(args, include, output_handle, stats):
+def bubbles_to_alignment(args, include, handles, stats):
     taxa = list(include.values())
-    alignment = Alignment(taxa, args.cons)
+    alignment = Alignment(taxa)
     for header_a, seq_a, header_b, seq_b in read_bubbles(os.path.join(args.path, args.infile)):
         stats['available'] += 1
         # INDEL paths have different lengths: their positions cannot be aligned by padding
@@ -226,47 +249,31 @@ def bubbles_to_alignment(args, include, output_handle, stats):
         # the four possible sequences of a sample, computed once per locus
         missing = 'N' * len(seq_a)
         paths = {'0': seq_a, '1': seq_b}
-        if args.cons:
-            het = ''.join(a if a == b else ambiguity(a, b) for a, b in zip(seq_a, seq_b))
+        het = ''.join(a if a == b else ambiguity(a, b) for a, b in zip(seq_a, seq_b))
         locus = header_a.split('|')[0]
-        # in allele mode a sequence is named after the path it comes from (as before)
+        # a haplotype is named after the path it comes from (-loc_info)
         path_names = {'0': locus, '1': header_b.split('|')[0]}
         sequences = {}
         for sample, (g1, g2) in genotypes.items():
             taxon = include.get(sample)
             if taxon is None:
                 continue
-            if args.cons:
-                if g1 == '.' or g2 == '.':
-                    seq = missing
-                elif g1 == g2:
-                    seq = paths[g1]
-                else:
-                    seq = het
-                sequences[taxon] = (seq,)
-                # write fasta to a common file
-                if args.loc_info:
-                    output_handle.write('>{0}_c_{1}\n{2}\n'.format(taxon, locus, seq))
-                else:
-                    output_handle.write('>{0}_{1}\n{2}\n'.format(taxon, locus, seq))
+            if g1 == '.' or g2 == '.':
+                consensus, haplotypes = missing, (missing, missing)
             else:
-                alleles = (paths.get(g1, missing) if g2 != '.' else missing,
-                           paths.get(g2, missing) if g1 != '.' else missing)
-                sequences[taxon] = alleles
-                # write fasta to a common file
-                for k, g, default in ((0, g1, '0'), (1, g2, '1')):
-                    if args.loc_info:
-                        output_handle.write('>{0}_{1}_{2}\n{3}\n'.format(taxon, k, path_names.get(g, path_names[default]), alleles[k]))
-                    else:
-                        output_handle.write('>{0}_{1}\n{2}\n'.format(taxon, k, alleles[k]))
+                consensus = paths[g1] if g1 == g2 else het
+                haplotypes = (paths.get(g1, missing), paths.get(g2, missing))
+            sequences[taxon] = (consensus,) + haplotypes
+            write_pseudo(handles, args.loc_info, taxon, locus, consensus, haplotypes,
+                         (path_names.get(g1, path_names['0']), path_names.get(g2, path_names['1'])))
         if not sequences:
             stats['no_sample'] += 1
             continue
         # taxa of the lookup table absent from this locus are missing data
         for taxon in taxa:
             if taxon not in sequences:
-                sequences[taxon] = (missing,) if args.cons else (missing, missing)
-        output_handle.write('\n')
+                sequences[taxon] = (missing, missing, missing)
+        end_pseudo_locus(handles)
         alignment.add_locus(sequences)
     return alignment
 
@@ -311,9 +318,9 @@ def read_vcf_loci(vcf_file):
         yield locus, samples, sites
 
 
-def haplotypes_to_alignment(args, include, output_handle, stats):
+def haplotypes_to_alignment(args, include, handles, stats):
     taxa = list(include.values())
-    alignment = Alignment(taxa, args.cons)
+    alignment = Alignment(taxa)
     prefix = os.path.join(args.path, args.haplotypes)
     consensus = read_loci_fasta(prefix + '_loci.fa')
     for locus, samples, sites in read_vcf_loci(prefix + '.vcf'):
@@ -390,30 +397,16 @@ def haplotypes_to_alignment(args, include, output_handle, stats):
                     hap_0, hap_1 = missing, missing
                 else:
                     hap_0, hap_1 = ''.join(hap_0), ''.join(hap_1)
-                if args.cons:
-                    cache[genotype] = (''.join(ambiguity(x, y) for x, y in zip(hap_0, hap_1)),)
-                else:
-                    cache[genotype] = (hap_0, hap_1)
+                cache[genotype] = (''.join(ambiguity(x, y) for x, y in zip(hap_0, hap_1)), hap_0, hap_1)
             sequences[taxon] = cache[genotype]
-            # write fasta to a common file
-            if args.cons:
-                if args.loc_info:
-                    output_handle.write('>{0}_c_{1}\n{2}\n'.format(taxon, locus, cache[genotype][0]))
-                else:
-                    output_handle.write('>{0}_{1}\n{2}\n'.format(taxon, locus, cache[genotype][0]))
-            else:
-                for k in (0, 1):
-                    if args.loc_info:
-                        output_handle.write('>{0}_{1}_{2}\n{3}\n'.format(taxon, k, locus, cache[genotype][k]))
-                    else:
-                        output_handle.write('>{0}_{1}\n{2}\n'.format(taxon, k, cache[genotype][k]))
+            write_pseudo(handles, args.loc_info, taxon, locus, cache[genotype][0], cache[genotype][1:], (locus, locus))
         if not sequences:
             stats['no_sample'] += 1
             continue
         for taxon in taxa:
             if taxon not in sequences:
-                sequences[taxon] = (missing,) if args.cons else (missing, missing)
-        output_handle.write('\n')
+                sequences[taxon] = (missing, missing, missing)
+        end_pseudo_locus(handles)
         alignment.add_locus(sequences)
     return alignment
 
@@ -473,7 +466,10 @@ def main():
                         'of the table (bcftools reheader) is not renamed, the table only selects and orders the samples',
                         type=str, required=False, default=None)
     parser.add_argument('-path', help='Path to project directory; default ./', type=str, required=False, default='./')
-    parser.add_argument('-cons', help='Generate consensus sequence; default True', type=str, required=False, default='True')
+    parser.add_argument('-cons', help='both (default): write the consensus files (<out>.fas/.nex/.phy/.pseudo.fasta, haplotypes '
+                        'collapsed, IUPAC codes at the heterozygous sites) and the haplotype files (<out>_haplotypes.*, '
+                        'two rows per sample: <sample>_1 and <sample>_2); True: consensus files only; False: haplotype files only',
+                        type=str, required=False, default='both')
     parser.add_argument('-loc_info', help='Include locus name in header; default False', type=str, required=False, default='False')
     parser.add_argument('-min_rank', '--minimum_rank', help='minimum rank (Rk with -H: the median of the sites of a locus); '
                         'parallog metric, default .4 (decimal)', type=float, required=False, default=.4)
@@ -484,18 +480,26 @@ def main():
     parser.add_argument('-max_miss', '--maximum_missingness', help='maximum missing data per locus, default .5 (decimal)', type=float, required=False, default=.5)
     parser.add_argument('-min_poly', '--minimum_polymorphisms', help='minimum number of SNPs per locus, default 3 (integer)', type=int, required=False, default=3)
     args = parser.parse_args()
-    args.cons = str2bool(args.cons)
+    if args.cons.lower() == 'both':
+        kinds = ('consensus', 'haplotypes')
+    else:
+        kinds = ('consensus',) if str2bool(args.cons) else ('haplotypes',)
+    file_names = {'consensus': args.outfile, 'haplotypes': args.outfile + '_haplotypes'}
     args.loc_info = str2bool(args.loc_info)
     args.skip_long = str2bool(args.skip_long)
 
     lookup = read_lookup(os.path.join(args.path, args.lookup)) if args.lookup else None
     include = match_lookup(lookup, data_samples(args))
     stats = defaultdict(int)
-    with open(os.path.join(args.path, args.outfile + '.pseudo.fasta'), 'w') as output_handle:
+    handles = {kind: open(os.path.join(args.path, file_names[kind] + '.pseudo.fasta'), 'w') for kind in kinds}
+    try:
         if args.infile:
-            alignment = bubbles_to_alignment(args, include, output_handle, stats)
+            alignment = bubbles_to_alignment(args, include, handles, stats)
         else:
-            alignment = haplotypes_to_alignment(args, include, output_handle, stats)
+            alignment = haplotypes_to_alignment(args, include, handles, stats)
+    finally:
+        for handle in handles.values():
+            handle.close()
     with open(os.path.join(args.path, args.outfile + '.partitions'), 'w') as partition_handle:
         partition_handle.write(''.join(x + '\n' for x in alignment.partitions))
 
@@ -513,11 +517,13 @@ def main():
         print('No locus passed the filters: no fasta, nexus or phylip file written')
         return
 
-    # write out fasta, nexus and phylip formats
-    rows = alignment.rows()
-    make_fasta(rows, args.path, args.outfile)
-    make_nexus(rows, alignment.partitions, args.path, args.outfile)
-    make_phylip(rows, args.path, args.outfile)
+    # write out fasta, nexus and phylip formats: the consensus and/or the haplotypes
+    for kind in kinds:
+        rows = alignment.rows(kind)
+        make_fasta(rows, args.path, file_names[kind])
+        make_nexus(rows, alignment.partitions, args.path, file_names[kind])
+        make_phylip(rows, args.path, file_names[kind])
+        print('{0} files: {1}.fas, .nex, .phy, .pseudo.fasta ({2} rows)'.format(kind.capitalize(), file_names[kind], len(rows)))
 
 
 if __name__ == '__main__':
